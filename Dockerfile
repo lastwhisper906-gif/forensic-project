@@ -39,8 +39,10 @@ COPY agents/ .
 # 리포트 디렉토리 생성 (Excel 출력용)
 RUN mkdir -p reports
 
-# DB 파일이 컨테이너 재시작 후에도 유지되도록 볼륨 마운트 포인트 선언
-VOLUME ["/app/reports", "/app/forensic.db"]
+# 리포트 볼륨만 선언 (forensic.db는 /tmp에 저장하므로 VOLUME 불필요)
+# 주의: VOLUME에 파일 경로를 넣으면 Docker가 해당 경로를 디렉토리로 만들어
+#       SQLite가 파일을 열지 못하는 문제가 생김 → 제거
+VOLUME ["/app/reports"]
 
 EXPOSE 8000
 

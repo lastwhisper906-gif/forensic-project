@@ -39,8 +39,19 @@ def _make_engine() -> Engine:
             url = url.replace("postgres://", "postgresql://", 1)
         return create_engine(url, pool_pre_ping=True)
     else:
-        # SQLite fallback — agents/ 디렉토리에 저장
-        db_path = Path(__file__).parent / "forensic.db"
+        # SQLite fallback
+        # DB_PATH 환경변수 우선 → 미설정 시 /tmp/forensic.db
+        # /tmp 는 Render / Railway / Docker 모든 환경에서 쓰기 가능.
+        # (앱 디렉토리는 read-only이거나 VOLUME으로 디렉토리가 선점될 수 있음)
+        db_path_env = os.getenv("DB_PATH")
+        if db_path_env:
+            db_path = Path(db_path_env)
+        else:
+            db_path = Path("/tmp") / "forensic.db"
+
+        # 부모 디렉토리가 없으면 생성
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
         return create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
 
 
