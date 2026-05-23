@@ -1,0 +1,57 @@
+{
+  "name": "Forensic Pipeline",
+
+  // Python 3.11 공식 devcontainer 이미지
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+
+  // Node.js 추가 (Claude Code CLI 설치용)
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "20"
+    }
+  },
+
+  // Codespace 생성 시 1회 실행 (의존성 설치)
+  "onCreateCommand": "bash .devcontainer/setup.sh",
+
+  // FastAPI 서버 포트 포워딩
+  "forwardPorts": [8000],
+  "portsAttributes": {
+    "8000": {
+      "label": "FastAPI (forensic-pipeline)",
+      "onAutoForward": "notify"
+    }
+  },
+
+  // GitHub Codespaces Secrets에서 자동 주입할 환경변수
+  // → github.com/settings/codespaces 에서 등록
+  "secrets": {
+    "ANTHROPIC_API_KEY": {
+      "description": "Anthropic API 키 (sk-ant-...)"
+    },
+    "SEC_USER_AGENT": {
+      "description": "SEC EDGAR 식별자 (예: forensic-app/1.0 you@email.com)"
+    }
+  },
+
+  // VS Code 확장
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.black-formatter",
+        "ms-python.pylint",
+        "ms-toolsai.jupyter",
+        "humao.rest-client"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "editor.formatOnSave": true,
+        "[python]": {
+          "editor.defaultFormatter": "ms-python.black-formatter"
+        },
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  }
+}
