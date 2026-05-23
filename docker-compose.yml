@@ -1,0 +1,62 @@
+# ── Forensic Pipeline — docker-compose ───────────────────────────────────────
+#
+# 프로필:
+#   (기본) SQLite 모드:
+#     docker compose up
+#
+#   Postgres 모드:
+#     docker compose --profile postgres up
+#
+# 환경변수는 .env 파일에 넣거나 shell에서 export:
+#   ANTHROPIC_API_KEY=sk-ant-...
+#   SEC_USER_AGENT=you@example.com
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── FastAPI 분석 서버 ────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - SEC_USER_AGENT=${SEC_USER_AGENT}
+      # Postgres 사용 시 아래 줄 활성화 (--profile postgres 와 함께)
+      # - DATABASE_URL=postgresql://forensic:forensic@db:5432/forensic
+      - API_KEY=${API_KEY:-}          # 미설정 시 인증 없음
+    volumes:
+      - forensic_reports:/app/reports
+      - forensic_db:/app              # SQLite forensic.db 유지
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Postgres (선택, --profile postgres로 활성화) ─────────────────────────
+  db:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: forensic
+      POSTGRES_PASSWORD: forensic
+      POSTGRES_DB: forensic
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forensic"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+
+volumes:
+  forensic_reports:
+  forensic_db:
+  postgres_data:

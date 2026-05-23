@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(& \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\pip.exe\" install dart-fss pandas yfinance openpyxl schedule)",
+      "PowerShell(& \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\scripts\\\\fetch_company_list.py\")",
+      "PowerShell($env:PYTHONIOENCODING = 'utf-8'; & \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\scripts\\\\fetch_company_list.py\")",
+      "PowerShell($env:PYTHONIOENCODING = 'utf-8'; & \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\python.exe\" -u \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\scripts\\\\fetch_company_list.py\")",
+      "PowerShell(& \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\pip.exe\" install FinanceDataReader 2>&1 | Select-Object -Last 5)",
+      "PowerShell(& \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\pip.exe\" install pykrx 2>&1 | Select-Object -Last 5)",
+      "PowerShell(& \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\python.exe\" -c \"import curl_cffi, pandas; print\\('OK'\\)\")",
+      "PowerShell(curl.exe -v --tlsv1.2 -o \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\data\\\\corpCode.zip\" \"https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key=5e67214e2ada4027d32b8fd208cd9025a07b5be5\" 2>&1 | Select-Object -First 40)",
+      "PowerShell(curl.exe --http2 -A \"Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36\" -o \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\data\\\\corpCode.zip\" \"https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key=5e67214e2ada4027d32b8fd208cd9025a07b5be5\" 2>&1 | Select-Object -First 40)",
+      "PowerShell(& \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\pip.exe\" install \"httpx[http2]\" -q)",
+      "PowerShell(Test-NetConnection *)",
+      "PowerShell(& \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\pip.exe\" install finance-datareader -q; & \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\pip.exe\" install OpenDartReader -q)",
+      "PowerShell(Resolve-DnsName *)",
+      "PowerShell(& \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\python.exe\" -c \"import ssl, sys; print\\('Python:', sys.version\\); print\\('OpenSSL:', ssl.OPENSSL_VERSION\\)\")",
+      "PowerShell(& \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\python.exe\" \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\scripts\\\\fetch_company_list.py\" 2>&1)",
+      "PowerShell(& \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\pip.exe\" install FinanceDataReader 2>&1 | Select-Object -Last 8)",
+      "PowerShell(& \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\python.exe\" -m pip install --upgrade pip -q 2>&1 | Select-Object -Last 3)",
+      "PowerShell(& \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\pip.exe\" install FinanceDataReader --index-url https://pypi.org/simple/ -v 2>&1 | Select-Object -Last 20)",
+      "PowerShell(& \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\pip.exe\" install \"git+https://github.com/FinanceData/FinanceDataReader.git\" 2>&1 | Select-Object -Last 8)"
+    ]
+  }
+}

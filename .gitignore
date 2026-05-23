@@ -1,0 +1,50 @@
+# 환경변수 (절대 커밋 금지)
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# 가상환경
+venv/
+.venv/
+env/
+.env_local/
+
+# DB / 데이터
+*.db
+*.sqlite
+*.sqlite3
+
+# 분석 리포트 (용량 큼)
+agents/reports/
+reports/
+
+# 로그
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Docker
+.dockerignore
+
+# 테스트 아티팩트
+.pytest_cache/
+htmlcov/
+.coverage
