@@ -32,7 +32,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 import httpx
@@ -950,3 +950,709 @@ def _filter_series(
 
     sorted_pairs = sorted(period_map.items(), key=lambda x: x[0], reverse=True)[:periods]
     return dict(sorted(sorted_pairs, key=lambda x: x[0]))
+
+
+# ===========================================================================
+# SESSION 3 — 고수준 Ticker-first 래퍼
+# agents.py MCP 도구에서 직접 호출하는 공개 인터페이스.
+# 내부적으로 Group A / B / C primitive를 조합.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# sec_xbrl_financials  (Agent 1 / 2 / 3)
+# ---------------------------------------------------------------------------
+
+async def sec_xbrl_financials(ticker: str, years: int = 3) -> dict:
+    """Ticker 하나로 SEC EDGAR XBRL 재무 시계열 반환 (원스톱 래퍼).
+
+    get_company_cik → get_company_facts → extract_financial_timeseries
+    3단계를 하나로 묶음.
+
+    Args:
+        ticker: 미국 종목 티커 (예: "NVDA")
+        years:  연간 기간 수 (기본 3년)
+
+    Returns:
+        extract_financial_timeseries() 결과 dict +
+        top-level "ticker", "cik" 키 추가.
+        주요 시계열 키: revenue, net_income, operating_cf, capex,
+        depreciation, accounts_receivable, total_assets, deferred_revenue,
+        rd_expense, total_equity, long_term_debt, meta
+    """
+    cik = await get_company_cik(ticker)
+    facts = await get_company_facts(cik)
+    ts = extract_financial_timeseries(facts, periods=years, form_filter="10-K")
+    ts["ticker"] = ticker
+    ts["cik"] = cik
+    return ts
+
+
+# ---------------------------------------------------------------------------
+# sec_10k_sections  (Agent 2 / 3 / 4 — 10-K Diff 엔진 핵심)
+# ---------------------------------------------------------------------------
+
+# 공개 section 이름 → extract_10k_sections() 내부 키 매핑
+_SECTION_ALIAS: dict[str, str] = {
+    "risk_factors":         "item_1a",
+    "mda":                  "item_7",
+    "financial_statements": "item_8",
+    "controls":             "item_9a",
+    # 특수 섹션: 별도 추출 로직 적용
+    # "critical_accounting" → item_7 내 Critical Accounting Estimates 부분
+    # "related_party"       → item_8 주석에서 Related Party note 추출
+    # "audit_opinion"       → item_8 앞부분(감사보고서 위치)
+}
+
+_CRITICAL_ACCT_RE = re.compile(
+    r"critical\s+accounting\s+"
+    r"(?:estimates?|policies|judgments?|assumptions?)",
+    re.I,
+)
+_AUDIT_OPINION_RE = re.compile(
+    r"Report\s+of\s+Independent\s+Registered|"
+    r"To\s+(?:the\s+)?(?:Stockholders|Shareholders|Board\s+of\s+Directors)",
+    re.I,
+)
+
+
+def _extract_subsection(text: str, header_pat: re.Pattern, max_chars: int) -> str:
+    """텍스트에서 패턴으로 시작하는 부분 섹션을 다음 주요 헤딩 전까지 추출."""
+    m = header_pat.search(text)
+    if not m:
+        return ""
+    start = m.start()
+    # 다음 섹션 헤딩 후보 (ITEM N / PART / 단독 대문자 줄)
+    next_hdg = re.search(
+        r"\n(?:ITEM\s+\d|PART\s+[IVX]+|[A-Z][A-Z\s]{6,60}\n)",
+        text[m.end(): m.end() + max_chars + 1000],
+    )
+    end = start + (m.end() - m.start()) + (next_hdg.start() if next_hdg else max_chars)
+    return text[start:end][:max_chars]
+
+
+async def _build_10k_snapshot(
+    accession_no: str,
+    cik: str,
+    sections: list[str],
+    max_chars: int,
+) -> dict[str, str]:
+    """단일 10-K accession → 요청된 섹션 dict 반환."""
+    full_text = await fetch_10k_text(accession_no, cik)
+    base = extract_10k_sections(full_text)   # item_1a / item_7 / item_8 / item_9a
+
+    out: dict[str, str] = {}
+    for sec in sections:
+        if sec in _SECTION_ALIAS:
+            raw = base.get(_SECTION_ALIAS[sec], "")
+            out[sec] = raw[:max_chars]
+
+        elif sec == "critical_accounting":
+            item7 = base.get("item_7", "")
+            out[sec] = _extract_subsection(item7, _CRITICAL_ACCT_RE, max_chars)
+
+        elif sec == "related_party":
+            item8 = base.get("item_8", "")
+            notes_data = extract_10k_notes(item8 or full_text)
+            rp_title = notes_data["required_sections"].get("related_party")
+            out[sec] = (
+                notes_data["notes"].get(rp_title, "")[:max_chars]
+                if rp_title else ""
+            )
+
+        elif sec == "audit_opinion":
+            item8 = base.get("item_8", "")
+            out[sec] = _extract_subsection(item8[:20_000], _AUDIT_OPINION_RE, max_chars)
+
+        else:
+            out[sec] = ""
+
+    return out
+
+
+async def sec_10k_sections(
+    ticker: str,
+    prior_year: bool = True,
+    sections: list[str] | None = None,
+    max_chars_per_section: int = 6000,
+) -> dict:
+    """Ticker → 10-K 핵심 섹션 추출 (현재연도 + 전년도).
+
+    Agent 4 (10-K Language Diff) 핵심 데이터 소스.
+    Agent 2 (RPO/Deferred Rev), Agent 3 (Useful Life) 보조 데이터.
+
+    Args:
+        ticker:                미국 종목 티커
+        prior_year:            True면 N-1 10-K도 함께 반환 (Diff 비교용)
+        sections:              추출할 섹션 키 목록.
+                               None이면 기본 5개:
+                               ['risk_factors','mda','critical_accounting',
+                                'related_party','audit_opinion']
+        max_chars_per_section: 섹션당 최대 문자 수 (기본 6,000)
+
+    Returns:
+        {
+          "ticker": "NVDA",
+          "cik": "0001045810",
+          "sections_requested": [...],
+          "current": {
+            "filing_date": "2024-02-21",
+            "period_of_report": "2024-01-28",
+            "accession_no": "...",
+            "sections": {"risk_factors": "...", "mda": "...", ...}
+          },
+          "prior": { ... } | None   # prior_year=False 또는 구형 종목이면 None
+        }
+
+    Notes:
+        - 10-K 전문 다운로드 포함 → 첫 호출 시 5~20초 소요
+        - SEC rate limit(초당 10회) 자동 준수
+    """
+    _DEFAULT_SECTIONS = [
+        "risk_factors", "mda", "critical_accounting",
+        "related_party", "audit_opinion",
+    ]
+    if sections is None:
+        sections = _DEFAULT_SECTIONS
+
+    cik = await get_company_cik(ticker)
+    count = 3 if prior_year else 1
+    filings = await list_filings(cik, "10-K", count=count)
+
+    if not filings:
+        return {
+            "ticker": ticker, "cik": cik,
+            "error": "No 10-K filings found on EDGAR.",
+            "current": None, "prior": None,
+            "sections_requested": sections,
+        }
+
+    current_filing = filings[0]
+    current_snap = await _build_10k_snapshot(
+        current_filing["accession_no"], cik, sections, max_chars_per_section
+    )
+
+    prior_snap = None
+    if prior_year and len(filings) >= 2:
+        prior_filing = filings[1]
+        prior_raw = await _build_10k_snapshot(
+            prior_filing["accession_no"], cik, sections, max_chars_per_section
+        )
+        prior_snap = {
+            "filing_date":      prior_filing["filing_date"],
+            "period_of_report": prior_filing.get("period_of_report", ""),
+            "accession_no":     prior_filing["accession_no"],
+            "sections":         prior_raw,
+        }
+
+    return {
+        "ticker":             ticker,
+        "cik":                cik,
+        "sections_requested": sections,
+        "current": {
+            "filing_date":      current_filing["filing_date"],
+            "period_of_report": current_filing.get("period_of_report", ""),
+            "accession_no":     current_filing["accession_no"],
+            "sections":         current_snap,
+        },
+        "prior": prior_snap,
+    }
+
+
+# ---------------------------------------------------------------------------
+# sec_earnings_releases  (Agent 5)
+# ---------------------------------------------------------------------------
+
+_EARNINGS_BODY_RE = re.compile(
+    r"results\s+of\s+operations|earnings\s+(?:per\s+share|release|results)|"
+    r"quarterly\s+(?:earnings|revenue|results)",
+    re.I,
+)
+
+
+async def sec_earnings_releases(ticker: str, quarters: int = 4) -> dict:
+    """8-K Item 2.02 / 7.01 어닝스 릴리즈 텍스트 최근 N분기.
+
+    전략:
+      1. submissions API의 items 필드로 2.02 / 7.01 포함 8-K 고속 필터
+      2. 각 filing의 EX-99.1 (프레스 릴리즈) 다운로드
+      3. items 필드 부재 시 최근 8-K 일부를 직접 스캔하여 보완
+
+    Args:
+        ticker:   미국 종목 티커
+        quarters: 가져올 분기 수 (기본 4)
+
+    Returns:
+        {
+          "ticker": ...,
+          "quarters_requested": 4,
+          "releases_found": 3,
+          "releases": [
+            {
+              "filing_date": "2024-11-20",
+              "accession_no": "...",
+              "items": ["2.02", "9.01"],
+              "text": "...press release full text (최대 20,000자)..."
+            },
+            ...
+          ]
+        }
+    """
+    cik = await get_company_cik(ticker)
+    cik_nodash = cik.lstrip("0") or "0"
+
+    # submissions API로 items 필드 일괄 조회 (텍스트 다운로드 없이 필터)
+    sub_url = f"{_DATA_BASE}/submissions/CIK{cik}.json"
+    async with _make_client() as client:
+        resp = await _get(sub_url, client)
+        raw = resp.json()
+
+    recent_block = raw.get("filings", {}).get("recent", {})
+    forms      = recent_block.get("form", [])
+    acc_nos    = recent_block.get("accessionNumber", [])
+    dates_list = recent_block.get("filingDate", [])
+    item_codes = recent_block.get("items", [])
+    prim_docs  = recent_block.get("primaryDocument", [])
+
+    candidates: list[dict] = []
+    for i, form in enumerate(forms):
+        if form.strip() != "8-K":
+            continue
+        items_str    = str(item_codes[i]) if i < len(item_codes) else ""
+        filing_items = [x.strip() for x in items_str.split(",") if x.strip()]
+        if "2.02" in filing_items or "7.01" in filing_items:
+            acc = acc_nos[i] if i < len(acc_nos) else ""
+            pdoc = prim_docs[i] if i < len(prim_docs) else ""
+            nd   = _nodash(acc)
+            candidates.append({
+                "filing_date":  dates_list[i] if i < len(dates_list) else "",
+                "accession_no": acc,
+                "items":        filing_items,
+                "document_url": (
+                    f"{_EDGAR_BASE}/Archives/edgar/data/{cik_nodash}/{nd}/{pdoc}"
+                    if pdoc else ""
+                ),
+            })
+        if len(candidates) >= quarters * 3:
+            break
+
+    releases: list[dict] = []
+    async with _make_client() as client:
+        for cand in candidates:
+            if len(releases) >= quarters:
+                break
+            try:
+                idx = await get_filing_index(cand["accession_no"], cik)
+                # EX-99.1 우선
+                target_url = ""
+                for doc in idx["documents"]:
+                    if doc["type"] in ("EX-99.1", "EX-99.01", "EX-99") and \
+                       doc["document"].endswith((".htm", ".html", ".txt")):
+                        target_url = doc["url"]
+                        break
+                if not target_url:
+                    target_url = cand["document_url"]
+                if not target_url:
+                    continue
+
+                resp = await _get(target_url, client)
+                soup = BeautifulSoup(resp.text, "lxml")
+                for tag in soup(["script", "style", "head"]):
+                    tag.decompose()
+                text = soup.get_text(separator="\n")[:20_000]
+                releases.append({
+                    "filing_date":  cand["filing_date"],
+                    "accession_no": cand["accession_no"],
+                    "items":        cand["items"],
+                    "text":         text,
+                })
+            except Exception:
+                continue
+
+    # 보완: items 필드가 비어 있는 경우 최근 8-K 직접 스캔
+    if len(releases) < quarters and not candidates:
+        fallback_filings = await list_filings(cik, "8-K", count=quarters * 4)
+        async with _make_client() as client:
+            for filing in fallback_filings:
+                if len(releases) >= quarters:
+                    break
+                try:
+                    resp = await _get(filing["document_url"], client)
+                    soup = BeautifulSoup(resp.text, "lxml")
+                    head = soup.get_text()[:2000]
+                    if _EARNINGS_BODY_RE.search(head) or "2.02" in head or "7.01" in head:
+                        for tag in soup(["script", "style"]):
+                            tag.decompose()
+                        releases.append({
+                            "filing_date":  filing["filing_date"],
+                            "accession_no": filing["accession_no"],
+                            "items":        [],
+                            "text":         soup.get_text(separator="\n")[:20_000],
+                        })
+                except Exception:
+                    continue
+
+    releases.sort(key=lambda x: x["filing_date"], reverse=True)
+    return {
+        "ticker":             ticker,
+        "quarters_requested": quarters,
+        "releases_found":     len(releases),
+        "releases":           releases[:quarters],
+    }
+
+
+# ---------------------------------------------------------------------------
+# sec_8k_items  (Agent 6)
+# ---------------------------------------------------------------------------
+
+async def sec_8k_items(
+    ticker: str,
+    items: list[str] | None = None,
+    days: int = 180,
+) -> dict:
+    """8-K 중 특정 Item 코드를 포함하는 filing 고속 필터링.
+
+    SEC submissions API의 items 필드를 직접 읽어
+    텍스트 다운로드 없이 이벤트를 탐지함.
+
+    Args:
+        ticker: 미국 종목 티커
+        items:  필터할 Item 코드 (기본: ["4.02","5.02","8.01","2.06"])
+                4.02 = Non-Reliance on Prior Financials (재무제표 재작성 경고)
+                5.02 = 임원 변경 (CFO 교체 등)
+                8.01 = 기타 중요 이벤트
+                2.06 = Material Impairment
+                4.01 = 외부감사인 변경
+        days:   탐색 기간 일수 (기본 180)
+
+    Returns:
+        {
+          "ticker": ...,
+          "items_searched": [...],
+          "days": ...,
+          "items_found": [
+            {
+              "item": "5.02",
+              "all_items_in_filing": ["5.02", "9.01"],
+              "filing_date": "2024-09-15",
+              "accession_no": "...",
+              "document_url": "..."
+            }
+          ],
+          "has_critical_event": true|false  # 4.02 또는 5.02 포함 시 True
+        }
+    """
+    if items is None:
+        items = ["4.02", "5.02", "8.01", "2.06"]
+
+    cik = await get_company_cik(ticker)
+    cik_nodash = cik.lstrip("0") or "0"
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+
+    sub_url = f"{_DATA_BASE}/submissions/CIK{cik}.json"
+    async with _make_client() as client:
+        resp = await _get(sub_url, client)
+        data = resp.json()
+
+    recent = data.get("filings", {}).get("recent", {})
+    forms      = recent.get("form", [])
+    acc_nos    = recent.get("accessionNumber", [])
+    dates_list = recent.get("filingDate", [])
+    item_codes = recent.get("items", [])
+    prim_docs  = recent.get("primaryDocument", [])
+
+    matches: list[dict] = []
+    for i, form in enumerate(forms):
+        if form.strip() != "8-K":
+            continue
+        filing_date = dates_list[i] if i < len(dates_list) else ""
+        if filing_date < cutoff:
+            break  # submissions는 날짜 역순 → cutoff 이전 도달 시 중단
+
+        items_raw    = str(item_codes[i]) if i < len(item_codes) else ""
+        filing_items = [x.strip() for x in items_raw.split(",") if x.strip()]
+        acc          = acc_nos[i] if i < len(acc_nos) else ""
+        pdoc         = prim_docs[i] if i < len(prim_docs) else ""
+        nd           = _nodash(acc)
+        doc_url = (
+            f"{_EDGAR_BASE}/Archives/edgar/data/{cik_nodash}/{nd}/{pdoc}"
+            if pdoc else ""
+        )
+
+        for target in items:
+            if target in filing_items:
+                matches.append({
+                    "item":                target,
+                    "all_items_in_filing": filing_items,
+                    "filing_date":         filing_date,
+                    "accession_no":        acc,
+                    "document_url":        doc_url,
+                })
+
+    return {
+        "ticker":             ticker,
+        "items_searched":     items,
+        "days":               days,
+        "items_found":        matches,
+        "has_critical_event": any(m["item"] in ("4.02", "5.02") for m in matches),
+    }
+
+
+# ---------------------------------------------------------------------------
+# sec_form4  (Agent 6)
+# ---------------------------------------------------------------------------
+
+def _xml_text(elem: Any, path: str) -> str:
+    """XML 요소에서 텍스트 안전 추출 (None-safe)."""
+    found = elem.find(path)
+    if found is None:
+        return ""
+    return (found.text or "").strip()
+
+
+def _parse_form4_xml(xml_text: str, filing_date: str) -> list[dict]:
+    """Form 4 XML → 트랜잭션 리스트.
+
+    SEC Form 4 XML 구조 (schemaVersion X0406):
+      ownershipDocument
+        reportingOwner
+          reportingOwnerId/rptOwnerName
+          reportingOwnerRelationship/isOfficer, officerTitle
+        nonDerivativeTable/nonDerivativeTransaction
+          transactionCoding/transactionCode  S=매도 / P=매수
+          transactionAmounts/transactionShares/value
+          transactionAmounts/transactionPricePerShare/value
+          transactionAmounts/transactionAcquiredDisposedCode/value  D/A
+    """
+    from xml.etree import ElementTree as ET
+
+    try:
+        root = ET.fromstring(xml_text.strip())
+    except ET.ParseError:
+        return []
+
+    owner_name    = _xml_text(root, ".//rptOwnerName")
+    is_officer    = _xml_text(root, ".//isOfficer") == "1"
+    officer_title = _xml_text(root, ".//officerTitle")
+
+    transactions: list[dict] = []
+    for txn in root.findall(".//nonDerivativeTransaction"):
+        code     = _xml_text(txn, ".//transactionCode")
+        shares_s = _xml_text(txn, ".//transactionShares/value")
+        price_s  = _xml_text(txn, ".//transactionPricePerShare/value")
+        acq_disp = _xml_text(txn, ".//transactionAcquiredDisposedCode/value")
+
+        if not code:
+            continue
+        try:
+            shares = float(shares_s) if shares_s else 0.0
+            price  = float(price_s)  if price_s  else 0.0
+        except ValueError:
+            shares = price = 0.0
+
+        is_sell = (code == "S") or (acq_disp == "D" and code not in ("P",))
+        is_buy  = (code == "P") or (acq_disp == "A" and code not in ("S",))
+        if not (is_sell or is_buy):
+            continue
+
+        transactions.append({
+            "filing_date":    filing_date,
+            "owner_name":     owner_name,
+            "is_officer":     is_officer,
+            "officer_title":  officer_title,
+            "transaction_code": "S" if is_sell else "P",
+            "shares":           shares,
+            "price_per_share":  price,
+            "total_value":      round(shares * price, 2),
+        })
+
+    return transactions
+
+
+async def sec_form4(ticker: str, days: int = 90) -> dict:
+    """SEC Form 4 임원/이사 내부자 거래 최근 N일.
+
+    XML 파싱으로 매수(P) / 매도(S) 트랜잭션 추출.
+    대규모 매도 클러스터 = 핵심 Short catalyst 신호.
+
+    Args:
+        ticker: 미국 종목 티커
+        days:   탐색 기간 일수 (기본 90)
+
+    Returns:
+        {
+          "ticker": ...,
+          "days": ...,
+          "transactions": [
+            {
+              "filing_date": "2024-09-10",
+              "owner_name": "John Smith",
+              "is_officer": true,
+              "officer_title": "CFO",
+              "transaction_code": "S",   # S=매도, P=매수
+              "shares": 10000.0,
+              "price_per_share": 487.23,
+              "total_value": 4872300.0
+            }, ...
+          ],
+          "sell_count": 5,
+          "buy_count": 1,
+          "total_sell_value_usd": 9744600.0,
+          "sell_signal": "ELEVATED|WARNING|NORMAL"
+        }
+    """
+    cik = await get_company_cik(ticker)
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+
+    all_form4    = await list_filings(cik, "4", count=80)
+    recent_form4 = [f for f in all_form4 if f.get("filing_date", "") >= cutoff]
+
+    transactions: list[dict] = []
+    async with _make_client() as client:
+        for filing in recent_form4[:50]:
+            try:
+                idx = await get_filing_index(filing["accession_no"], cik)
+                # XML 문서 탐색
+                xml_url = ""
+                for doc in idx["documents"]:
+                    dtype = doc.get("type", "")
+                    dname = doc.get("document", "")
+                    if dtype in ("4", "4/A") and dname.endswith(".xml"):
+                        xml_url = doc["url"]
+                        break
+                # 폴백: 첫 번째 xml 파일
+                if not xml_url:
+                    for doc in idx["documents"]:
+                        if doc.get("document", "").endswith(".xml"):
+                            xml_url = doc["url"]
+                            break
+                if not xml_url:
+                    xml_url = filing.get("document_url", "")
+                if not xml_url:
+                    continue
+
+                resp = await _get(xml_url, client)
+                txns = _parse_form4_xml(resp.text, filing["filing_date"])
+                transactions.extend(txns)
+            except Exception:
+                continue
+
+    sell_txns  = [t for t in transactions if t["transaction_code"] == "S"]
+    buy_txns   = [t for t in transactions if t["transaction_code"] == "P"]
+    total_sell = sum(t["total_value"] for t in sell_txns)
+
+    return {
+        "ticker":               ticker,
+        "days":                 days,
+        "transactions":         transactions,
+        "sell_count":           len(sell_txns),
+        "buy_count":            len(buy_txns),
+        "total_sell_value_usd": round(total_sell, 2),
+        "sell_signal": (
+            "ELEVATED" if len(sell_txns) >= 10 else
+            "WARNING"  if len(sell_txns) >= 5  else
+            "NORMAL"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# sec_corresp  (Agent 6)
+# ---------------------------------------------------------------------------
+
+async def sec_corresp(ticker: str, days: int = 365) -> dict:
+    """SEC 서신 왕래 (CORRESP / UPLOAD) 탐지.
+
+    CORRESP = SEC가 기업에 보내는 comment letter
+    UPLOAD  = 기업이 SEC에 제출하는 답변서
+
+    활성 서신 교환 = SEC가 해당 기업 공시를 검토 중
+                  = 회계 재작성 선행 지표.
+    CORRESP + NT 10-K (제출 지연) 동시 발생 시 HIGH RISK.
+
+    Args:
+        ticker: 미국 종목 티커
+        days:   탐색 기간 일수 (기본 365)
+
+    Returns:
+        {
+          "ticker": ...,
+          "days": ...,
+          "corresp_count": 2,
+          "upload_count": 3,
+          "active_correspondence": true,
+          "latest_corresp_date": "2024-06-15",
+          "latest_upload_date": "2024-07-22",
+          "corresp_filings": [...],   # 최근 5개 메타데이터
+          "upload_filings": [...]
+        }
+    """
+    cik = await get_company_cik(ticker)
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+
+    corresp_all = await list_filings(cik, "CORRESP", count=20)
+    upload_all  = await list_filings(cik, "UPLOAD",  count=20)
+
+    corresp_recent = [f for f in corresp_all if f.get("filing_date", "") >= cutoff]
+    upload_recent  = [f for f in upload_all  if f.get("filing_date", "") >= cutoff]
+
+    return {
+        "ticker":                ticker,
+        "days":                  days,
+        "corresp_count":         len(corresp_recent),
+        "upload_count":          len(upload_recent),
+        "active_correspondence": bool(corresp_recent or upload_recent),
+        "latest_corresp_date":   corresp_recent[0]["filing_date"] if corresp_recent else None,
+        "latest_upload_date":    upload_recent[0]["filing_date"]  if upload_recent  else None,
+        "corresp_filings":       corresp_recent[:5],
+        "upload_filings":        upload_recent[:5],
+    }
+
+
+# ---------------------------------------------------------------------------
+# yahoo_overview  (Agent 1)
+# ---------------------------------------------------------------------------
+
+def yahoo_overview(ticker: str) -> dict:
+    """Yahoo Finance 현재가 / 시가총액 / 기본 밸류에이션 (미국 종목).
+
+    동기 함수 (yfinance는 sync API).
+    Owner Earnings Yield, 공매도 잔고 등 forensic 보조 지표 포함.
+
+    Args:
+        ticker: 미국 종목 티커 (예: "NVDA")
+
+    Returns:
+        {
+          "ticker": ..., "name": ..., "price": ...,
+          "market_cap": ..., "short_percent_float": ..., ...
+        }
+    """
+    try:
+        import yfinance as yf  # lazy import (시작 비용 절감)
+    except ImportError:
+        return {"ticker": ticker, "error": "yfinance not installed; pip install yfinance"}
+
+    try:
+        info = yf.Ticker(ticker).info
+        return {
+            "ticker":              ticker,
+            "name":                info.get("longName") or info.get("shortName", ""),
+            "price":               info.get("currentPrice") or info.get("regularMarketPrice"),
+            "market_cap":          info.get("marketCap"),
+            "enterprise_value":    info.get("enterpriseValue"),
+            "pe_trailing":         info.get("trailingPE"),
+            "pe_forward":          info.get("forwardPE"),
+            "ev_ebitda":           info.get("enterpriseToEbitda"),
+            "ev_revenue":          info.get("enterpriseToRevenue"),
+            "shares_outstanding":  info.get("sharesOutstanding"),
+            "float_shares":        info.get("floatShares"),
+            "shares_short":        info.get("sharesShort"),
+            "short_ratio":         info.get("shortRatio"),
+            "short_percent_float": info.get("shortPercentOfFloat"),
+            "sector":              info.get("sector"),
+            "industry":            info.get("industry"),
+            "52w_high":            info.get("fiftyTwoWeekHigh"),
+            "52w_low":             info.get("fiftyTwoWeekLow"),
+        }
+    except Exception as e:
+        return {"ticker": ticker, "error": str(e)}

@@ -152,7 +152,7 @@ async def _run_analysis(job_id: str, request: AnalyzeRequest):
     _jobs[job_id]["status"] = "running"
 
     try:
-        from orchestrator import analyze_stock
+        from orchestrator import analyze_stock, forensic_result_to_dict  # noqa: F401
     except Exception as e:
         _jobs[job_id]["status"] = "failed"
         _jobs[job_id]["error"] = f"orchestrator import error: {e}"
@@ -163,20 +163,28 @@ async def _run_analysis(job_id: str, request: AnalyzeRequest):
         ticker = ticker.upper().strip()
         t0 = time.perf_counter()
         try:
-            result = await analyze_stock(
+            from orchestrator import analyze_stock, forensic_result_to_dict
+            forensic_obj = await analyze_stock(
                 ticker,
                 skip_orchestrator=request.skip_orchestrator,
             )
+            duration_sec = round(time.perf_counter() - t0, 1)
+            # ForensicResult → DB 호환 dict 변환
+            result = forensic_result_to_dict(
+                forensic_obj,
+                skip_orchestrator=request.skip_orchestrator,
+                duration_sec=duration_sec,
+            )
         except Exception as e:
             result = {
-                "ticker": ticker,
-                "error": str(e),
+                "ticker":         ticker,
+                "error":          str(e),
                 "forensic_score": None,
-                "tier": None,
-                "tier_label": None,
+                "tier":           None,
+                "tier_label":     None,
+                "duration_sec":   round(time.perf_counter() - t0, 1),
+                "agent_reports":  [],
             }
-
-        result["duration_sec"] = round(time.perf_counter() - t0, 1)
 
         # Tier 필터
         tier = result.get("tier")

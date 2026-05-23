@@ -291,6 +291,55 @@ def classify_tier(forensic_score: int | None) -> tuple[int, str]:
 
 
 # ---------------------------------------------------------------------------
+# ForensicResult → DB 호환 dict 변환 (api.py에서 사용)
+# ---------------------------------------------------------------------------
+
+def forensic_result_to_dict(
+    result: "ForensicResult",
+    skip_orchestrator: bool = False,
+    duration_sec: float | None = None,
+) -> dict[str, Any]:
+    """ForensicResult 객체 → db.save_result() 호환 dict.
+
+    api.py의 _run_analysis() 에서 analyze_stock() 반환값을
+    DB에 저장하기 전 변환할 때 사용.
+
+    Returns:
+        dict with keys: ticker, forensic_score, tier, tier_label,
+        short_thesis, skip_orchestrator, weights, error,
+        duration_sec, agent_reports (list[dict])
+    """
+    sc   = calculate_forensic_score(result)
+    orch = result.reports.get("Orchestrator")
+    orch_summary = orch.summary if orch and not orch.error else {}
+
+    # agent_reports: db.py save_result 포맷에 맞게 변환
+    agent_reports: list[dict] = []
+    for agent_key, score_key in SCORE_KEY_MAP.items():
+        r = result.reports.get(agent_key)
+        if r:
+            agent_reports.append({
+                "agent_key": agent_key,
+                "score":     r.summary.get(score_key) if r.summary else None,
+                "flags":     r.summary.get("red_flags", []) if r.summary else [],
+                "summary":   r.text[:500] if r.text else None,
+            })
+
+    return {
+        "ticker":           result.ticker,
+        "forensic_score":   orch_summary.get("forensic_score") or sc["forensic_score"],
+        "tier":             orch_summary.get("tier") or sc["tier"],
+        "tier_label":       orch_summary.get("tier_label") or sc["tier_label"],
+        "short_thesis":     (orch.text[:2000] if orch and not orch.error else None),
+        "skip_orchestrator": skip_orchestrator,
+        "weights":          DEFAULT_WEIGHTS,
+        "error":            None,
+        "duration_sec":     duration_sec if duration_sec is not None else result.elapsed_sec,
+        "agent_reports":    agent_reports,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator — Claude Opus 총괄
 # ---------------------------------------------------------------------------
 
