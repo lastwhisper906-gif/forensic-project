@@ -154,16 +154,16 @@ _QA_SPLIT_RE = re.compile(
 
 # 질문 토픽 추출용 키워드
 _TOPIC_KEYWORDS: list[tuple[str, re.Pattern]] = [
-    ("revenue recognition",  re.compile(r"revenue\s+recogni[sz]", re.I)),
+    ("revenue recognition",   re.compile(r"revenue\s+recogni[sz]", re.I)),
     ("customer concentration", re.compile(r"customer\s+concentrat|single\s+customer|top\s+customer", re.I)),
-    ("guidance",              re.compile(r"\bguidance\b|\boutlook\b|\bforecast\b", re.I)),
-    ("margins",               re.compile(r"\bmargin\b|\bgross\s+margin\b|\boperating\s+margin\b", re.I)),
-    ("useful life",           re.compile(r"useful\s+life|depreciation\s+(?:period|polic)", re.I)),
-    ("accounting change",     re.compile(r"accounting\s+(?:change|polic|method)", re.I)),
-    ("capital allocation",    re.compile(r"buyback|dividend|capex|capital\s+alloc", re.I)),
-    ("inventory",             re.compile(r"\binventory\b|\bstock\b|\bbacklog\b", re.I)),
-    ("competition",           re.compile(r"competit(?:or|ion)|market\s+share", re.I)),
-    ("regulation",            re.compile(r"regulat(?:ory|ion)|export\s+control|sanction", re.I)),
+    ("guidance",               re.compile(r"\bguidance\b|\boutlook\b|\bforecast\b", re.I)),
+    ("margins",                re.compile(r"\bmargin\b|\bgross\s+margin\b|\boperating\s+margin\b", re.I)),
+    ("useful life",            re.compile(r"useful\s+life|depreciation\s+(?:period|polic)", re.I)),
+    ("accounting change",      re.compile(r"accounting\s+(?:change|polic|method)", re.I)),
+    ("capital allocation",     re.compile(r"buyback|dividend|capex|capital\s+alloc", re.I)),
+    ("inventory",              re.compile(r"\binventory\b|\bstock\b|\bbacklog\b", re.I)),
+    ("competition",            re.compile(r"competit(?:or|ion)|market\s+share", re.I)),
+    ("regulation",             re.compile(r"regulat(?:ory|ion)|export\s+control|sanction", re.I)),
 ]
 
 
@@ -209,16 +209,14 @@ def _extract_question_topic(question_text: str) -> str:
 def _detect_evasions(qa_text: str, quarter: str) -> list[dict]:
     """Q&A 섹션에서 회피 패턴 탐지."""
     evasions = []
-    # 단순 분할 (응답 텍스트 블록별)
     blocks = re.split(r"\n(?=Management:|Response:|A:)", qa_text, flags=re.I)
     for block in blocks:
         for pat_info in QA_EVASION_PATTERNS:
             if pat_info["pattern"].search(block):
-                # 근접 context에서 토픽 추출
                 topic = _extract_question_topic(block)
                 evasions.append({
-                    "quarter":      quarter,
-                    "evasion_type": pat_info["type"],
+                    "quarter":        quarter,
+                    "evasion_type":   pat_info["type"],
                     "question_topic": topic,
                 })
                 break  # 동일 블록 중복 탐지 방지
@@ -241,7 +239,7 @@ def _trend_label(values: list[float]) -> str:
     """값 목록의 전반적 추세 (INCREASING / DECREASING / STABLE)."""
     if len(values) < 2:
         return "STABLE"
-    first_half = sum(values[: len(values) // 2]) / max(1, len(values) // 2)
+    first_half  = sum(values[: len(values) // 2]) / max(1, len(values) // 2)
     second_half = sum(values[len(values) // 2 :]) / max(1, len(values) - len(values) // 2)
     diff = second_half - first_half
     threshold = max(abs(first_half) * 0.05, 1e-6)
@@ -277,10 +275,7 @@ def analyze_earnings_calls(
         분기별 + 추세 + 플래그 dict
     """
     by_quarter: list[dict] = []
-    all_new_kpis: set[str] = set()
     new_kpi_first_quarter: str | None = None
-
-    kpi_patterns_by_cat: dict[str, list[str]] = KPI_VOCAB
 
     for idx, text in enumerate(transcripts):
         if not text or not text.strip():
@@ -289,103 +284,78 @@ def analyze_earnings_calls(
         label = _extract_quarter_label(text, idx)
 
         # KPI 카운트
-        kpi_counts: dict[str, int] = {}
-        for cat, patterns in kpi_patterns_by_cat.items():
-            kpi_counts[cat] = _count_vocab(text, patterns)
+        kpi_counts: dict[str, int] = {
+            cat: _count_vocab(text, patterns)
+            for cat, patterns in KPI_VOCAB.items()
+        }
 
-        new_kpis_this_q = kpi_counts.get("new_kpis_to_watch", 0)
-        if new_kpis_this_q > 0 and new_kpi_first_quarter is None:
+        if kpi_counts.get("new_kpis_to_watch", 0) > 0 and new_kpi_first_quarter is None:
             new_kpi_first_quarter = label
-
-        # Hedging
-        hd = _hedge_density(text)
-
-        # Confidence
-        conf = _count_vocab(text, CONFIDENCE_VOCAB)
-
-        # Non-GAAP count (pattern 수)
-        ng_count = kpi_counts.get("non_gaap", 0)
 
         # Q&A 섹션 분리
         qa_match = _QA_SPLIT_RE.search(text)
-        qa_text = text[qa_match.start():] if qa_match else ""
-        evasions = _detect_evasions(qa_text, label) if qa_text else []
-
-        # 가이던스
-        guidance = _detect_guidance(text)
+        qa_text  = text[qa_match.start():] if qa_match else ""
 
         by_quarter.append({
-            "quarter":       label,
-            "kpis":          kpi_counts,
-            "hedge_density": hd,
-            "confidence":    conf,
-            "non_gaap_count": ng_count,
-            "evasions":      evasions,
-            "guidance":      guidance,
+            "quarter":        label,
+            "kpis":           kpi_counts,
+            "hedge_density":  _hedge_density(text),
+            "confidence":     _count_vocab(text, CONFIDENCE_VOCAB),
+            "non_gaap_count": kpi_counts.get("non_gaap", 0),
+            "evasions":       _detect_evasions(qa_text, label) if qa_text else [],
+            "guidance":       _detect_guidance(text),
         })
 
-    # 시계열 트렌드: 분기 레이블에서 연도+분기 추출하여 오래된 순 정렬
-    # 추출 실패 시 원본 입력 순서 유지 (뒤집지 않음)
+    # 시계열 트렌드: 연도+분기 번호 추출 → ascending 정렬
+    # 추출 실패 시 원본 입력 순서 유지
     def _qtr_sort_key(q: dict) -> tuple:
         label = q.get("quarter", "")
-        # "Q3 2023" → (2023, 3)
         m = re.search(r"(\d{4})[^\d]*Q?([1-4])|Q([1-4])[^\d]*(\d{4})", label, re.I)
         if m:
             g = m.groups()
-            year = int(g[0] or g[3] or 0)
-            qnum = int(g[1] or g[2] or 0)
-            return (year, qnum)
+            return (int(g[0] or g[3] or 0), int(g[1] or g[2] or 0))
         return (0, 0)
 
-    sorted_quarters = sorted(by_quarter, key=_qtr_sort_key)
-    # 모두 (0,0)이면 정렬 실패 → 원본 순서 유지
-    if all(_qtr_sort_key(q) == (0, 0) for q in sorted_quarters):
-        ordered = list(by_quarter)   # 입력 그대로
+    sorted_q = sorted(by_quarter, key=_qtr_sort_key)
+    if all(_qtr_sort_key(q) == (0, 0) for q in sorted_q):
+        ordered = list(by_quarter)
     else:
-        ordered = sorted_quarters    # 오래된 순 (ascending)
+        ordered = sorted_q
 
-    hedge_densities = [q["hedge_density"] for q in ordered]
-    conf_counts     = [q["confidence"] for q in ordered]
-    ng_counts       = [q["non_gaap_count"] for q in ordered]
-    gaap_counts     = [q["kpis"]["gaap_core"] for q in ordered]
-    non_gaap_counts = [q["kpis"]["non_gaap"] for q in ordered]
-    new_kpi_counts  = [q["kpis"]["new_kpis_to_watch"] for q in ordered]
+    hedge_densities = [q["hedge_density"]           for q in ordered]
+    conf_counts     = [float(q["confidence"])        for q in ordered]
+    ng_counts       = [float(q["non_gaap_count"])    for q in ordered]
+    gaap_counts     = [float(q["kpis"]["gaap_core"]) for q in ordered]
+    ng_kpi_counts   = [float(q["kpis"]["non_gaap"])  for q in ordered]
+    new_kpi_counts  = [float(q["kpis"]["new_kpis_to_watch"]) for q in ordered]
 
     hedge_trend = _trend_label(hedge_densities)
-    conf_trend  = _trend_label([float(c) for c in conf_counts])
-    ng_trend    = _trend_label([float(n) for n in ng_counts])
-    gaap_trend  = _trend_label([float(g) for g in gaap_counts])
+    conf_trend  = _trend_label(conf_counts)
+    ng_trend    = _trend_label(ng_counts)
+    gaap_trend  = _trend_label(gaap_counts)
 
     oldest = ordered[0] if ordered else {}
     latest = ordered[-1] if ordered else {}
 
-    hedge_delta_pct = _pct_change(
-        oldest.get("hedge_density", 0),
-        latest.get("hedge_density", 0),
-    )
-    conf_delta_pct = _pct_change(
-        float(oldest.get("confidence", 0)),
-        float(latest.get("confidence", 0)),
-    )
+    hedge_delta_pct = _pct_change(oldest.get("hedge_density", 0), latest.get("hedge_density", 0))
+    conf_delta_pct  = _pct_change(float(oldest.get("confidence", 0)), float(latest.get("confidence", 0)))
 
-    # Q&A 회피 집계
-    all_evasions = [ev for q in ordered for ev in q.get("evasions", [])]
+    all_evasions    = [ev for q in ordered for ev in q.get("evasions", [])]
     evasion_by_type: dict[str, int] = defaultdict(int)
     for ev in all_evasions:
         evasion_by_type[ev["evasion_type"]] += 1
 
-    # KPI 대체 감지: GAAP 감소 + Non-GAAP 증가 동시 발생
-    kpi_substitution_detected = bool(
+    kpi_substitution = bool(
         len(ordered) >= 2
         and gaap_trend == "DECREASING"
-        and ng_trend == "INCREASING"
+        and ng_trend   == "INCREASING"
     )
 
     flags = {
         "hedge_density_increasing":  hedge_trend == "INCREASING",
-        "confidence_declining":      conf_trend == "DECREASING",
-        "non_gaap_expanding":        ng_trend == "INCREASING",
-        "kpi_substitution_detected": kpi_substitution_detected,
+        "confidence_declining":      conf_trend  == "DECREASING",
+        "non_gaap_expanding":        ng_trend    == "INCREASING",
+        "kpi_substitution_detected": kpi_substitution,
         "new_kpis_introduced":       new_kpi_first_quarter is not None,
         "new_kpi_first_quarter":     new_kpi_first_quarter or "N/A",
         "hedge_delta_over_15pct":    bool(hedge_delta_pct and hedge_delta_pct > 15),
@@ -406,27 +376,21 @@ def analyze_earnings_calls(
         "## Q&A 회피 패턴",
     ]
     for ev in all_evasions[:10]:
-        summary_lines.append(
-            f"  [{ev['quarter']}] {ev['evasion_type']} — 주제: {ev['question_topic']}"
-        )
+        summary_lines.append(f"  [{ev['quarter']}] {ev['evasion_type']} — 주제: {ev['question_topic']}")
 
-    if flags.get("kpi_substitution_detected"):
-        summary_lines.append(
-            "\n⚠️ KPI 대체 탐지: GAAP 지표 감소 + Non-GAAP 지표 증가"
-        )
+    if kpi_substitution:
+        summary_lines.append("\n⚠️ KPI 대체 탐지: GAAP 지표 감소 + Non-GAAP 지표 증가")
     if new_kpi_first_quarter:
-        summary_lines.append(
-            f"\n⚠️ 신규 KPI 첫 등장: {new_kpi_first_quarter} — forensic 주의"
-        )
+        summary_lines.append(f"\n⚠️ 신규 KPI 첫 등장: {new_kpi_first_quarter} — forensic 주의")
 
     return {
         "ticker":                  ticker,
         "quarters_analyzed":       len(ordered),
         "by_quarter":              ordered,
         "kpi_trends": {
-            "gaap_core":  gaap_trend,
-            "non_gaap":   ng_trend,
-            "new_kpis":   _trend_label([float(n) for n in new_kpi_counts]),
+            "gaap_core": gaap_trend,
+            "non_gaap":  ng_trend,
+            "new_kpis":  _trend_label(new_kpi_counts),
         },
         "hedging_trend": {
             "trend":           hedge_trend,
@@ -458,34 +422,26 @@ def agent5_precomputed(
     """Agent 5 사전 계산 컨텍스트 패키지.
 
     Args:
-        ticker:               종목 코드
-        transcripts:          분기별 전체 transcript 텍스트 리스트 (우선)
+        ticker:                종목 코드
+        transcripts:           분기별 전체 transcript 텍스트 리스트 (우선)
         earnings_releases_raw: data_sources.sec_earnings_releases() 반환값 (fallback)
 
     Returns:
-        analyze_earnings_calls() 결과 + agent 메타데이터
+        analyze_earnings_calls() 결과 + data_source 필드
     """
     texts: list[str] = []
 
-    # 우선순위 1: 사용자 업로드 transcript
     if transcripts:
         texts = [t for t in transcripts if t and t.strip()]
-
-    # 우선순위 2: SEC 8-K earnings releases
     elif earnings_releases_raw:
         raw = earnings_releases_raw
-        if isinstance(raw, dict):
-            releases = raw.get("releases", raw.get("results", []))
-        elif isinstance(raw, list):
-            releases = raw
-        else:
-            releases = []
-
+        releases = (
+            raw.get("releases", raw.get("results", []))
+            if isinstance(raw, dict)
+            else (raw if isinstance(raw, list) else [])
+        )
         for r in releases:
-            if isinstance(r, dict):
-                text = r.get("text", "") or r.get("content", "") or str(r)
-            else:
-                text = str(r)
+            text = (r.get("text", "") or r.get("content", "") or str(r)) if isinstance(r, dict) else str(r)
             if text.strip():
                 texts.append(text)
 
