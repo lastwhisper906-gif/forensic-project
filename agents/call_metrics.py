@@ -48,277 +48,206 @@ KPI_VOCAB: dict[str, list[str]] = {
         r"\bbacklog\b", r"\bcommitted\s+(?:contract\s+)?value\b",
         r"\bcontracted\s+future\s+revenue\b", r"\bnet\s+revenue\s+retention\b",
         r"\bNRR\b", r"\bgross\s+(?:retention|dollar)\b",
-        r"\bpipeline\b", r"\bengagement\b", r"\bmomentum\b",
+        r"\bpipeline\b", r"\bTCV\b", r"\btotal contract value\b",
+        r"\bGMV\b", r"\bnormalized\b", r"\badjusted FCF\b",
+        r"\bcore operating income\b",
     ],
 }
 
-# Hedging language → 카테고리
+# Hedging language — 증가하면 경보
 HEDGING_VOCAB: dict[str, list[str]] = {
     "challenging": [
-        r"\bchallenging\b", r"\btough(?:er)?\b", r"\bdifficult\b",
-        r"\bheadwind\b", r"\bpressure\b",
+        r"\bchallenging\b", r"\bheadwind\b", r"\bpressured?\b",
+        r"\bdifficult\b", r"\bsoft\b", r"\bweak(?:ness|er)?\b",
+        r"\bslowdown\b", r"\bcautious(?:ly)?\b",
     ],
     "timing": [
-        r"\blumpy\b", r"\btiming\b", r"\bpush[-\s]?out\b", r"\bpushed\s+out\b",
-        r"\bdelayed?\b", r"\bslipped?\b",
+        r"\blumpy\b", r"\btiming\b", r"\bpush[-\s]?out\b",
+        r"\bdelay(?:ed|s)?\b", r"\bslip(?:page)?\b",
+        r"\bback[-\s]?end(?:\s+loaded)?\b", r"\buneven\b",
     ],
     "transitory": [
-        r"\btransitory\b", r"\bone[-\s]?time\b", r"\btemporary\b",
-        r"\bnormalize\b", r"\bnormalization\b", r"\banomalous\b",
+        r"\btransitory\b", r"\btemporary\b", r"\bshort[-\s]?term\b",
+        r"\bmomentary\b", r"\bone[-\s]?time\b", r"\bnon[-\s]?recurring\b",
     ],
     "macro": [
-        r"\bmacro\b", r"\bmacroeconomic\b", r"\bcurrency\b",
-        r"\bFX\s+impact\b", r"\bforeign\s+exchange\b",
+        r"\bmacro(?:economic)?\b", r"\buncertain(?:ty)?\b",
+        r"\bvolatility\b", r"\binflationary\b", r"\binterest rate\b",
+        r"\bmarket condition\b",
     ],
     "uncertainty": [
-        r"\bwe\s+believe\b", r"\bwe\s+expect\b", r"\bapproximately\b",
-        r"\bwe\s+anticipate\b", r"\bmay\b", r"\bcould\b",
-        r"\bsubject\s+to\b", r"\bcontingent\b", r"\bpreliminary\b",
-        r"\bwe\s+(?:cannot|can't)\s+(?:guarantee|assure|promise)\b",
-        r"\bno\s+assurance\b",
+        r"\bwe\s+believe\b", r"\bwe\s+expect\b", r"\bwe\s+anticipate\b",
+        r"\bcannot\s+guarantee\b", r"\bapproximately\b",
+        r"\bsubject\s+to\s+change\b", r"\bmay\s+not\b",
+        r"\bcould\s+adversely\b", r"\bright\s+direction\b",
+        r"\bvisibility\s+(?:is\s+)?limited\b",
     ],
 }
 
-# Confidence markers (하락 추이 = 경고)
-CONFIDENCE_MARKERS: list[str] = [
-    r"\brecord\b", r"\bstrong(?:er)?\b", r"\brobust\b",
-    r"\bexceptional\b", r"\bexceeded\b", r"\boutperformed\b",
-    r"\boutstanding\b", r"\bsolid\b", r"\bhealthy\b",
-    r"\bexcellent\b", r"\bbeating\s+expectations?\b",
+# Confidence markers — 감소하면 경보
+CONFIDENCE_VOCAB: list[str] = [
+    r"\bconfident\b", r"\bstrategically\s+positioned\b",
+    r"\bstrong\s+demand\b", r"\brecord\b", r"\bexceptional\b",
+    r"\bbest[-\s]ever\b", r"\bclear\s+visibility\b",
+    r"\bstrong\s+execution\b",
 ]
 
 # Q&A 회피 패턴
-QA_EVASION_PATTERNS: list[tuple[str, str]] = [
-    (r"(?:don'?t|do\s+not)\s+(?:break\s+that\s+out|break\s+out\s+that|disclose\s+that)",
-     "refusal_to_disclose"),
-    (r"(?:not\s+(?:going|able)\s+to\s+(?:comment|provide|give|break)\b)",
-     "refusal_to_comment"),
-    (r"(?:we'?ll?\s+(?:take\s+that\s+offline|get\s+back\s+to\s+you))",
-     "deflection"),
-    (r"(?:as\s+(?:we|I)\s+(?:mentioned|said|noted)\s+earlier\b)",
-     "circular_reference"),
-    (r"(?:(?:competitive|strategic)\s+reasons?\b.{0,30}(?:can'?t|cannot|won'?t|will\s+not)\s+share)",
-     "competitive_excuse"),
-    (r"(?:I'?m\s+not\s+sure\s+I\s+(?:understand|follow)\s+the\s+question)",
-     "question_reframing"),
-    (r"(?:going\s+forward\b.{0,50}(?:we'll|we\s+will|we\s+plan)\s+(?:to\s+)?(?:provide|share|disclose))",
-     "future_promise_deflection"),
+QA_EVASION_PATTERNS: list[dict[str, Any]] = [
+    {
+        "type":    "refusal_to_disclose",
+        "pattern": re.compile(
+            r"we\s+don'?t\s+(?:break|provide|disclose|give|share)\s+(?:that|it|the)?",
+            re.I,
+        ),
+    },
+    {
+        "type":    "deflection",
+        "pattern": re.compile(
+            r"(?:take\s+that\s+offline|get\s+back\s+to\s+you|follow[\s-]up\s+later"
+            r"|will\s+address\s+separately)",
+            re.I,
+        ),
+    },
+    {
+        "type":    "question_reframing",
+        "pattern": re.compile(
+            r"I'?m\s+not\s+sure\s+(?:I\s+)?(?:fully\s+)?(?:understand|follow"
+            r"|see|get)\s+(?:the\s+question|what\s+you'?re)",
+            re.I,
+        ),
+    },
+    {
+        "type":    "circular_reference",
+        "pattern": re.compile(
+            r"(?:refer\s+you\s+to|as\s+(?:we\s+)?(?:mentioned|noted)\s+in\s+"
+            r"(?:our\s+)?(?:press\s+release|10[-\s]?[KQ]|annual\s+report))",
+            re.I,
+        ),
+    },
 ]
 
 # 가이던스 품질 패턴
-GUIDANCE_PATTERNS: dict[str, list[str]] = {
-    "specific": [
-        r"\bwe\s+(?:guide|expect|project|forecast)\s+(?:revenue|earnings|EPS).{0,20}\$[\d\.]+",
-        r"\bour\s+(?:guidance|outlook)\s+(?:is|for)\s+(?:Q\d|fiscal|full\s+year).{0,20}\$[\d\.]+",
-        r"\brange\s+of\s+\$[\d\.]+\s+(?:to|-)\s+\$[\d\.]+\b",
-    ],
-    "withdrawn": [
-        r"\bnot\s+(?:providing|issuing|giving)\s+(?:guidance|outlook)\b",
-        r"\bwithdrawn?\s+(?:our\s+)?(?:guidance|outlook)\b",
-        r"\bpause.{0,20}guidance\b",
-        r"\bsuspend.{0,20}guidance\b",
-    ],
-    "widening": [
-        r"\bwider\s+(?:range|band)\b",
-        r"\bincreased\s+uncertainty\b",
-        r"\bbroad(?:er)?\s+range\b",
-    ],
+GUIDANCE_PATTERNS: dict[str, re.Pattern] = {
+    "SPECIFIC":      re.compile(
+        r"we\s+(?:expect|guide|target|project|forecast)\s+(?:[^\.\n]{0,40})"
+        r"(?:\$[\d\.]+\s*(?:billion|million|B|M)\b|\d+[\.,]\d+%|\d+\s*(?:to|–|-)\s*\d+)",
+        re.I,
+    ),
+    "RANGE_WIDENED": re.compile(
+        r"we\s+(?:expect|anticipate)\s+(?:[^\.\n]{0,40})(?:wider|broader|expanded)\s+range",
+        re.I,
+    ),
+    "WITHDRAWN":     re.compile(
+        r"(?:not\s+providing|suspending|withdrawing|no\s+longer\s+providing|"
+        r"cannot\s+provide)\s+(?:specific\s+)?guidance",
+        re.I,
+    ),
 }
 
+# Q&A 섹션 구분자
+_QA_SPLIT_RE = re.compile(
+    r"(?:Q&A|Question[-\s]and[-\s]Answer|Questions?\s+and\s+Answers?|"
+    r"ANALYST\s+(?:Q&A|QUESTION)|Q\s*&\s*A\s*SESSION|QUESTION[-\s]ANSWER)",
+    re.I,
+)
 
-# ===========================================================================
-# 2) 쿼터 분리 헬퍼
-# ===========================================================================
-
-def _split_into_quarters(texts: list[str]) -> list[dict[str, Any]]:
-    """transcript 텍스트 리스트를 분기별 dict로 변환.
-
-    입력 형식 두 가지:
-      A) ["Q1 2024 Earnings Call...", "Q4 2023 Earnings Call..."]  — 분기별 별도 문자열
-      B) 단일 긴 문자열에 날짜 헤더 포함 — 자동 분리 시도
-
-    Returns:
-        [{"quarter": "Q1 2024", "text": "...", "has_qa": bool}, ...]
-        — 최신 순 정렬
-    """
-    quarters: list[dict[str, Any]] = []
-
-    for i, text in enumerate(texts):
-        if not text or not text.strip():
-            continue
-
-        # 쿼터/날짜 추출 시도
-        qtr_label = _extract_quarter_label(text, fallback=f"Period_{i+1}")
-
-        # Q&A 섹션 포함 여부
-        has_qa = bool(re.search(
-            r"(?:question[-\s]and[-\s]answer|Q&A|question\s+from|analyst\s+question)",
-            text, re.I
-        ))
-
-        quarters.append({
-            "quarter": qtr_label,
-            "text": text,
-            "has_qa": has_qa,
-            "word_count": len(text.split()),
-        })
-
-    return quarters
-
-
-def _extract_quarter_label(text: str, fallback: str = "Unknown") -> str:
-    """텍스트에서 분기 레이블 추출 (예: 'Q3 2024')."""
-    # "Q3 2024" 또는 "Third Quarter 2024" 패턴
-    m = re.search(
-        r"(?:Q[1-4]\s*[\-–]?\s*\d{4}|"
-        r"(?:First|Second|Third|Fourth)\s+Quarter\s+\d{4}|"
-        r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4})",
-        text[:500], re.I
-    )
-    if m:
-        return m.group().strip()
-
-    # "FY2024 Q3" 패턴
-    m2 = re.search(r"FY\d{4}\s*Q[1-4]|Q[1-4]\s*FY\d{4}", text[:500], re.I)
-    if m2:
-        return m2.group().strip()
-
-    return fallback
+# 질문 토픽 추출용 키워드
+_TOPIC_KEYWORDS: list[tuple[str, re.Pattern]] = [
+    ("revenue recognition",  re.compile(r"revenue\s+recogni[sz]", re.I)),
+    ("customer concentration", re.compile(r"customer\s+concentrat|single\s+customer|top\s+customer", re.I)),
+    ("guidance",              re.compile(r"\bguidance\b|\boutlook\b|\bforecast\b", re.I)),
+    ("margins",               re.compile(r"\bmargin\b|\bgross\s+margin\b|\boperating\s+margin\b", re.I)),
+    ("useful life",           re.compile(r"useful\s+life|depreciation\s+(?:period|polic)", re.I)),
+    ("accounting change",     re.compile(r"accounting\s+(?:change|polic|method)", re.I)),
+    ("capital allocation",    re.compile(r"buyback|dividend|capex|capital\s+alloc", re.I)),
+    ("inventory",             re.compile(r"\binventory\b|\bstock\b|\bbacklog\b", re.I)),
+    ("competition",           re.compile(r"competit(?:or|ion)|market\s+share", re.I)),
+    ("regulation",            re.compile(r"regulat(?:ory|ion)|export\s+control|sanction", re.I)),
+]
 
 
 # ===========================================================================
-# 3) 핵심 카운팅 함수들
+# 2) 내부 헬퍼
 # ===========================================================================
 
-def _count_kpis(text: str) -> dict[str, int]:
-    """KPI 카테고리별 언급 횟수."""
-    counts: dict[str, int] = {}
-    text_lower = text.lower()
-    for cat, patterns in KPI_VOCAB.items():
-        total = 0
-        for pat in patterns:
-            total += len(re.findall(pat, text_lower, re.I))
-        counts[cat] = total
-    return counts
+def _count_vocab(text: str, patterns: list[str]) -> int:
+    """패턴 리스트에 매칭되는 총 횟수."""
+    return sum(len(re.findall(p, text, re.I)) for p in patterns)
 
 
-def _count_hedging(text: str) -> dict[str, int]:
-    """Hedging language 카테고리별 언급 횟수."""
-    counts: dict[str, int] = {}
-    for cat, patterns in HEDGING_VOCAB.items():
-        total = 0
-        for pat in patterns:
-            total += len(re.findall(pat, text, re.I))
-        counts[cat] = total
-    counts["total"] = sum(counts.values())
-    return counts
-
-
-def _count_confidence(text: str) -> int:
-    """Confidence marker 총 언급 횟수."""
+def _hedge_density(text: str) -> float:
+    """hedge_count / word_count (0이면 0 반환)."""
+    words = len(text.split())
+    if words == 0:
+        return 0.0
     total = 0
-    for pat in CONFIDENCE_MARKERS:
-        total += len(re.findall(pat, text, re.I))
-    return total
+    for patterns in HEDGING_VOCAB.values():
+        total += _count_vocab(text, patterns)
+    return round(total / words, 4)
 
 
-def _count_non_gaap_metrics(text: str) -> int:
-    """비-GAAP 지표 종류 수 (중복 제외)."""
-    found: set[str] = set()
-    patterns = [
-        r"non[-\s]?GAAP\s+\w+(?:\s+\w+)?",
-        r"adjusted\s+\w+(?:\s+\w+)?(?:\s+\w+)?",
-        r"(?:free\s+cash\s+flow|FCF)(?:\s+\w+)?",
-        r"core\s+\w+(?:\s+\w+)?",
-    ]
-    for pat in patterns:
-        for m in re.finditer(pat, text, re.I):
-            term = re.sub(r"\s+", " ", m.group().lower().strip())
-            # 너무 일반적인 단어 제외
-            if len(term) > 6 and term not in {"adjusted revenue", "non-gaap"}:
-                found.add(term[:40])
-    return len(found)
-
-
-def _detect_qa_evasions(text: str, quarter: str) -> list[dict[str, str]]:
-    """Q&A 섹션에서 회피 패턴 탐지."""
-    evasions: list[dict[str, str]] = []
-
-    # Q&A 섹션만 추출
-    qa_m = re.search(
-        r"(?:question[-\s]and[-\s]answer|Q&A|QUESTION[-\s]AND[-\s]ANSWER)[^\n]*\n(.*)",
-        text, re.I | re.DOTALL
-    )
-    qa_text = qa_m.group(1) if qa_m else text
-
-    for pat, evasion_type in QA_EVASION_PATTERNS:
-        for m in re.finditer(pat, qa_text, re.I):
-            # 앞뒤 200자 컨텍스트 추출
-            start = max(0, m.start() - 200)
-            end   = min(len(qa_text), m.end() + 200)
-            context = qa_text[start:end].replace("\n", " ").strip()
-
-            # 어떤 주제에 대한 회피인지 추정
-            topic = _infer_evasion_topic(context)
-
-            evasions.append({
-                "quarter":          quarter,
-                "evasion_type":     evasion_type,
-                "question_topic":   topic,
-                "response_excerpt": context[:200],
-            })
-
-    return evasions
-
-
-def _infer_evasion_topic(context: str) -> str:
-    """회피 응답 컨텍스트에서 질문 주제 추정."""
-    topic_patterns = [
-        (r"useful\s+li(?:fe|ves)|depreciation|capex|capitaliz",   "capitalization/useful life"),
-        (r"customer\s+concentration|largest\s+customer",          "customer concentration"),
-        (r"margin|profitability|gross\s+profit",                   "margin/profitability"),
-        (r"revenue\s+recognition|deferred|backlog|RPO",           "revenue recognition"),
-        (r"SEC|investigation|inquiry|restatement",                 "regulatory/restatement"),
-        (r"guidance|outlook|forecast",                             "forward guidance"),
-        (r"insider|selling|option|stock",                          "insider transactions"),
-        (r"related\s+party|affiliate|invest(?:ment|ed)",           "related party"),
-        (r"inventory|channel|sell[-\s]through",                    "inventory/channel"),
-    ]
-    for pat, label in topic_patterns:
-        if re.search(pat, context, re.I):
-            return label
-    return "unclassified"
-
-
-def _detect_guidance_quality(text: str) -> str:
-    """가이던스 품질: SPECIFIC | WIDENING | WITHDRAWN | ABSENT."""
-    for q_type, patterns in GUIDANCE_PATTERNS.items():
-        for pat in patterns:
-            if re.search(pat, text, re.I):
-                return q_type.upper()
+def _detect_guidance(text: str) -> str:
+    """가이던스 품질 분류."""
+    if GUIDANCE_PATTERNS["WITHDRAWN"].search(text):
+        return "WITHDRAWN"
+    if GUIDANCE_PATTERNS["RANGE_WIDENED"].search(text):
+        return "RANGE_WIDENED"
+    if GUIDANCE_PATTERNS["SPECIFIC"].search(text):
+        return "SPECIFIC"
     return "ABSENT"
 
 
-# ===========================================================================
-# 4) 트렌드 계산 헬퍼
-# ===========================================================================
+def _extract_question_topic(question_text: str) -> str:
+    """Q&A 질문 토픽 추출."""
+    for label, pat in _TOPIC_KEYWORDS:
+        if pat.search(question_text):
+            return label
+    return "general"
 
-def _compute_trend(values: list[float | int]) -> str:
-    """리스트 → INCREASING | STABLE | DECREASING."""
+
+def _detect_evasions(qa_text: str, quarter: str) -> list[dict]:
+    """Q&A 섹션에서 회피 패턴 탐지."""
+    evasions = []
+    # 단순 분할 (응답 텍스트 블록별)
+    blocks = re.split(r"\n(?=Management:|Response:|A:)", qa_text, flags=re.I)
+    for block in blocks:
+        for pat_info in QA_EVASION_PATTERNS:
+            if pat_info["pattern"].search(block):
+                # 근접 context에서 토픽 추출
+                topic = _extract_question_topic(block)
+                evasions.append({
+                    "quarter":      quarter,
+                    "evasion_type": pat_info["type"],
+                    "question_topic": topic,
+                })
+                break  # 동일 블록 중복 탐지 방지
+    return evasions
+
+
+def _extract_quarter_label(text: str, idx: int) -> str:
+    """텍스트에서 분기 레이블 추출 (Q3 2023 형태)."""
+    m = re.search(
+        r"(?:Q[1-4]\s+(?:FY)?20\d{2}|(?:FY)?20\d{2}\s+Q[1-4]"
+        r"|(?:First|Second|Third|Fourth)\s+Quarter\s+20\d{2})",
+        text[:500], re.I,
+    )
+    if m:
+        return m.group(0).strip()
+    return f"Period-{idx + 1}"
+
+
+def _trend_label(values: list[float]) -> str:
+    """값 목록의 전반적 추세 (INCREASING / DECREASING / STABLE)."""
     if len(values) < 2:
-        return "INSUFFICIENT_DATA"
-    # 단순 선형 기울기
-    n = len(values)
-    xs = list(range(n))
-    mean_x = sum(xs) / n
-    mean_y = sum(values) / n
-    num = sum((xs[i] - mean_x) * (values[i] - mean_y) for i in range(n))
-    den = sum((x - mean_x) ** 2 for x in xs) or 1e-9
-    slope = num / den
-    threshold = mean_y * 0.05  # 5% 기울기 임계값
-    if slope > threshold:
+        return "STABLE"
+    first_half = sum(values[: len(values) // 2]) / max(1, len(values) // 2)
+    second_half = sum(values[len(values) // 2 :]) / max(1, len(values) - len(values) // 2)
+    diff = second_half - first_half
+    threshold = max(abs(first_half) * 0.05, 1e-6)
+    if diff > threshold:
         return "INCREASING"
-    if slope < -threshold:
+    if diff < -threshold:
         return "DECREASING"
     return "STABLE"
 
@@ -338,60 +267,61 @@ def analyze_earnings_calls(
     ticker: str,
     transcripts: list[str],
 ) -> dict[str, Any]:
-    """분기별 earnings call/release 텍스트 분석.
+    """분기별 transcript 리스트를 분석하여 포렌식 NLP 지표 반환.
 
     Args:
         ticker:      종목 코드
-        transcripts: 분기별 텍스트 리스트 (최신 순 또는 오래된 순; 자동 정렬)
-                     8-16개 권장.
+        transcripts: 분기별 transcript 텍스트 (오래된 것 먼저 또는 최신 먼저 모두 지원)
 
     Returns:
-        {
-          "ticker": str,
-          "quarters_analyzed": int,
-          "kpi_trends": {...},
-          "hedging_trend": {...},
-          "confidence_trend": {...},
-          "non_gaap_trend": {...},
-          "qa_evasions": [...],
-          "guidance_quality_latest": str,
-          "flags": {...},
-          "summary_text": str,
-        }
+        분기별 + 추세 + 플래그 dict
     """
-    if not transcripts:
-        return _empty_call_result(ticker, "transcripts 없음")
+    by_quarter: list[dict] = []
+    all_new_kpis: set[str] = set()
+    new_kpi_first_quarter: str | None = None
 
-    quarters = _split_into_quarters(transcripts)
-    if not quarters:
-        return _empty_call_result(ticker, "분기 분리 실패")
+    kpi_patterns_by_cat: dict[str, list[str]] = KPI_VOCAB
 
-    # 분기별 지표 계산
-    by_quarter: list[dict[str, Any]] = []
-    for q in quarters:
-        text = q["text"]
-        wc   = max(q["word_count"], 1)
+    for idx, text in enumerate(transcripts):
+        if not text or not text.strip():
+            continue
 
-        kpi_counts  = _count_kpis(text)
-        hedge_counts = _count_hedging(text)
-        conf_count  = _count_confidence(text)
-        ng_count    = _count_non_gaap_metrics(text)
-        evasions    = _detect_qa_evasions(text, q["quarter"]) if q["has_qa"] else []
-        guidance    = _detect_guidance_quality(text)
+        label = _extract_quarter_label(text, idx)
 
-        hedge_density = hedge_counts["total"] / wc
+        # KPI 카운트
+        kpi_counts: dict[str, int] = {}
+        for cat, patterns in kpi_patterns_by_cat.items():
+            kpi_counts[cat] = _count_vocab(text, patterns)
+
+        new_kpis_this_q = kpi_counts.get("new_kpis_to_watch", 0)
+        if new_kpis_this_q > 0 and new_kpi_first_quarter is None:
+            new_kpi_first_quarter = label
+
+        # Hedging
+        hd = _hedge_density(text)
+
+        # Confidence
+        conf = _count_vocab(text, CONFIDENCE_VOCAB)
+
+        # Non-GAAP count (pattern 수)
+        ng_count = kpi_counts.get("non_gaap", 0)
+
+        # Q&A 섹션 분리
+        qa_match = _QA_SPLIT_RE.search(text)
+        qa_text = text[qa_match.start():] if qa_match else ""
+        evasions = _detect_evasions(qa_text, label) if qa_text else []
+
+        # 가이던스
+        guidance = _detect_guidance(text)
 
         by_quarter.append({
-            "quarter":        q["quarter"],
-            "word_count":     wc,
-            "has_qa":         q["has_qa"],
-            "kpis":           kpi_counts,
-            "hedge_counts":   hedge_counts,
-            "hedge_density":  round(hedge_density, 5),
-            "confidence":     conf_count,
+            "quarter":      label,
+            "kpis":         kpi_counts,
+            "hedge_density": hd,
+            "confidence":   conf,
             "non_gaap_count": ng_count,
-            "evasions":       evasions,
-            "guidance":       guidance,
+            "evasions":     evasions,
+            "guidance":     guidance,
         })
 
     # 시계열 트렌드: 분기 레이블에서 연도+분기 추출하여 오래된 순 정렬
@@ -421,17 +351,11 @@ def analyze_earnings_calls(
     non_gaap_counts  = [q["kpis"]["non_gaap"] for q in ordered]
     new_kpi_counts   = [q["kpis"]["new_kpis_to_watch"] for q in ordered]
 
-    # KPI 비율 트렌드: Non-GAAP / GAAP 비율
-    ng_gaap_ratios = [
-        (ng / max(gc, 1)) for ng, gc in zip(non_gaap_counts, gaap_counts)
-    ]
+    hedge_trend  = _trend_label(hedge_densities)
+    conf_trend   = _trend_label([float(c) for c in conf_counts])
+    ng_trend     = _trend_label([float(n) for n in ng_counts])
+    gaap_trend   = _trend_label([float(g) for g in gaap_counts])
 
-    hedge_trend       = _compute_trend(hedge_densities)
-    confidence_trend  = _compute_trend(conf_counts)
-    non_gaap_trend    = _compute_trend(ng_counts)
-    ng_gaap_trend     = _compute_trend(ng_gaap_ratios)
-
-    # Oldest → Latest 변화율
     oldest = ordered[0] if ordered else {}
     latest = ordered[-1] if ordered else {}
 
@@ -450,92 +374,77 @@ def analyze_earnings_calls(
     for ev in all_evasions:
         evasion_by_type[ev["evasion_type"]] += 1
 
-    # 신규 KPI 도입 여부
-    new_kpi_first_seen_quarter: str | None = None
-    for q in ordered:
-        if q["kpis"]["new_kpis_to_watch"] > 0:
-            new_kpi_first_seen_quarter = q["quarter"]
-            break
+    # KPI 대체 감지: GAAP 감소 + Non-GAAP 증가 동시 발생
+    kpi_substitution_detected = bool(
+        len(ordered) >= 2
+        and gaap_trend == "DECREASING"
+        and (ng_trend == "INCREASING"
+             or (len(ordered) < 2 or non_gaap_counts[-1] > non_gaap_counts[0])
+        ) if len(ordered) >= 1 else False
+    )
 
-    kpi_substitution = (
-        non_gaap_counts[-1] > gaap_counts[-1]
-        and (len(ordered) < 2 or non_gaap_counts[-1] > non_gaap_counts[0])
-    ) if len(ordered) >= 1 else False
-
-    # 플래그 결정
-    flags: dict[str, bool | str] = {
+    flags = {
         "hedge_density_increasing":  hedge_trend == "INCREASING",
+        "confidence_declining":      conf_trend == "DECREASING",
+        "non_gaap_expanding":        ng_trend == "INCREASING",
+        "kpi_substitution_detected": kpi_substitution_detected,
+        "new_kpis_introduced":       new_kpi_first_quarter is not None,
+        "new_kpi_first_quarter":     new_kpi_first_quarter or "N/A",
         "hedge_delta_over_15pct":    bool(hedge_delta_pct and hedge_delta_pct > 15),
-        "confidence_declining":      confidence_trend == "DECREASING",
-        "non_gaap_expanding":        non_gaap_trend == "INCREASING",
-        "kpi_substitution_detected": kpi_substitution,
-        "new_kpis_introduced":       new_kpi_first_seen_quarter is not None,
-        "new_kpi_first_quarter":     new_kpi_first_seen_quarter or "N/A",
-        "guidance_withdrawn":        latest.get("guidance") == "WITHDRAWN",
-        "guidance_widening":         latest.get("guidance") == "WIDENING",
         "qa_evasions_detected":      len(all_evasions) > 0,
         "qa_evasion_count":          len(all_evasions),
+        "guidance_deteriorated":     latest.get("guidance", "ABSENT") in ("WITHDRAWN", "ABSENT"),
     }
 
-    # 요약 텍스트 (LLM 컨텍스트용)
     summary_lines = [
-        f"## Agent 5 사전 계산 — {ticker}",
+        f"[{ticker}] Earnings Call Language Analysis",
         f"분석 분기: {len(ordered)}개",
-        f"\n### KPI 트렌드",
-        f"Non-GAAP / GAAP 비율 트렌드: {ng_gaap_trend}",
-        f"Non-GAAP 지표 수 트렌드: {non_gaap_trend}",
-        f"신규 KPI 도입: {'예 (첫 등장 ' + (new_kpi_first_seen_quarter or 'N/A') + ')' if flags['new_kpis_introduced'] else '없음'}",
-        f"\n### Hedging Language 트렌드",
-        f"밀도 트렌드: {hedge_trend}",
-        f"최신 밀도: {latest.get('hedge_density', 0):.4f}",
-        f"누적 변화율: {hedge_delta_pct:+.1f}%" if hedge_delta_pct is not None else "누적 변화율: N/A",
-        f"\n### Confidence Marker 트렌드",
-        f"트렌드: {confidence_trend}",
-        f"최신 카운트: {latest.get('confidence', 'N/A')}",
-        f"\n### 가이던스 품질 (최신 분기)",
-        f"{latest.get('guidance', 'ABSENT')}",
-        f"\n### Q&A 회피 패턴",
-        f"총 {len(all_evasions)}건 탐지" if all_evasions else "탐지 없음",
+        f"Hedging 트렌드: {hedge_trend} | "
+        + (f"누적 변화율: {hedge_delta_pct:+.1f}%" if hedge_delta_pct is not None else "누적 변화율: N/A"),
+        f"Confidence 트렌드: {conf_trend}",
+        f"Non-GAAP 트렌드: {ng_trend}",
+        f"최신 가이던스 품질: {latest.get('guidance', 'ABSENT')}",
+        "",
+        "## Q&A 회피 패턴",
     ]
-    if evasion_by_type:
-        for t, cnt in sorted(evasion_by_type.items(), key=lambda x: -x[1]):
-            summary_lines.append(f"  {t}: {cnt}건")
+    for ev in all_evasions[:10]:
+        summary_lines.append(
+            f"  [{ev['quarter']}] {ev['evasion_type']} — 주제: {ev['question_topic']}"
+        )
 
-    summary_lines.append("\n### 🚩 플래그 요약")
-    for flag_name, val in flags.items():
-        if val and val is not False and val != "N/A":
-            summary_lines.append(f"  ⚑ {flag_name}: {val}")
+    if flags.get("kpi_substitution_detected"):
+        summary_lines.append(
+            "\n⚠️ KPI 대체 탐지: GAAP 지표 감소 + Non-GAAP 지표 증가"
+        )
+    if new_kpi_first_quarter:
+        summary_lines.append(
+            f"\n⚠️ 신규 KPI 첫 등장: {new_kpi_first_quarter} — forensic 주의"
+        )
 
     return {
-        "ticker":                 ticker,
-        "quarters_analyzed":      len(ordered),
-        "by_quarter":             by_quarter,
+        "ticker":                  ticker,
+        "quarters_analyzed":       len(ordered),
+        "by_quarter":              ordered,
         "kpi_trends": {
-            "non_gaap_trend":        non_gaap_trend,
-            "ng_gaap_ratio_trend":   ng_gaap_trend,
-            "new_kpi_first_quarter": new_kpi_first_seen_quarter,
-            "latest_gaap_count":     latest.get("kpis", {}).get("gaap_core"),
-            "latest_non_gaap_count": latest.get("kpis", {}).get("non_gaap"),
-            "latest_new_kpi_count":  latest.get("kpis", {}).get("new_kpis_to_watch"),
+            "gaap_core":       gaap_trend,
+            "non_gaap":        ng_trend,
+            "new_kpis":        _trend_label([float(n) for n in new_kpi_counts]),
         },
         "hedging_trend": {
-            "trend":             hedge_trend,
-            "hedge_delta_pct":   hedge_delta_pct,
-            "latest_density":    latest.get("hedge_density"),
-            "oldest_density":    oldest.get("hedge_density"),
-            "by_category_latest": latest.get("hedge_counts", {}),
+            "trend":           hedge_trend,
+            "hedge_delta_pct": hedge_delta_pct,
+            "densities":       hedge_densities,
         },
         "confidence_trend": {
-            "trend":           confidence_trend,
+            "trend":           conf_trend,
             "conf_delta_pct":  conf_delta_pct,
-            "latest_count":    latest.get("confidence"),
+            "counts":          conf_counts,
         },
         "non_gaap_trend": {
-            "trend":              non_gaap_trend,
-            "latest_count":       latest.get("non_gaap_count"),
-            "oldest_count":       oldest.get("non_gaap_count"),
+            "trend":           ng_trend,
+            "counts":          ng_counts,
         },
-        "qa_evasions":             all_evasions[:10],  # 최대 10건
+        "qa_evasions":             all_evasions,
         "qa_evasion_by_type":      dict(evasion_by_type),
         "guidance_quality_latest": latest.get("guidance", "ABSENT"),
         "flags":                   flags,
