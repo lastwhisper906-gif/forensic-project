@@ -752,9 +752,20 @@ _CONCEPT_CANDIDATES: dict[str, list[str]] = {
         "NetCashProvidedByUsedInOperatingActivities",
     ],
     "capex": [
+        # 최신 데이터 우선 — NVDA/AMD 등 주요 hyperscaler는 ProductiveAssets 사용
+        "PaymentsToAcquireProductiveAssets",
         "PaymentsToAcquirePropertyPlantAndEquipment",
         "CapitalExpendituresIncurredButNotYetPaid",
-        "PaymentsToAcquireProductiveAssets",
+        "PaymentsForCapitalImprovements",
+    ],
+    "ppe_net": [
+        "PropertyPlantAndEquipmentNet",
+        "PropertyPlantAndEquipmentGross",
+    ],
+    "capitalized_software": [
+        "CapitalizedComputerSoftwareNet",
+        "CapitalizedComputerSoftwareGross",
+        "BusinessAcquisitionCostOfAcquiredEntityTransactionCosts",
     ],
     "depreciation": [
         "DepreciationDepletionAndAmortization",
@@ -870,6 +881,7 @@ def extract_financial_timeseries(
             candidates = _CONCEPT_CANDIDATES.get(concept_key, [concept_key])
 
         series: dict[str, float] | None = None
+        best_latest: str = ""   # 최신 데이터를 가진 후보 우선 선택
         for candidate in candidates:
             node = us_gaap.get(candidate) or dei.get(candidate)
             if not node:
@@ -881,9 +893,13 @@ def extract_financial_timeseries(
                 or (next(iter(units.values()), None) if units else None)
             )
             if unit_data:
-                series = _filter_series(unit_data, form_filter, periods)
-                if series:
-                    break
+                candidate_series = _filter_series(unit_data, form_filter, periods)
+                if candidate_series:
+                    # 더 최신 데이터를 가진 후보가 있으면 교체
+                    candidate_latest = max(candidate_series.keys())
+                    if series is None or candidate_latest > best_latest:
+                        series = candidate_series
+                        best_latest = candidate_latest
 
         if series:
             if concept_key == "capex":
@@ -949,7 +965,8 @@ def _filter_series(
             period_map[end] = (float(val), filed)
 
     sorted_pairs = sorted(period_map.items(), key=lambda x: x[0], reverse=True)[:periods]
-    return dict(sorted(sorted_pairs, key=lambda x: x[0]))
+    # 값에서 float만 추출 (filed 문자열 제거) → {end_date: float}
+    return {k: v[0] for k, v in sorted(sorted_pairs, key=lambda x: x[0])}
 
 
 # ===========================================================================

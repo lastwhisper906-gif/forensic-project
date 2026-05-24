@@ -1,13 +1,21 @@
 """Forensic Pipeline 오케스트레이터 — 6-Agent 병렬 + Opus 총괄.
 
+Session 4 업데이트:
+  - Agent 1-3: Python 사전 계산 메트릭 → LLM 해석 분리
+  - Peer 데이터 한 번만 fetch하고 Agent 1-3 공유
+  - peer_set.py + quant_metrics.py 연동
+
 흐름:
-  Phase 1: 6개 포렌식 에이전트 전부 asyncio.gather 병렬 실행
-           accruals / revenue / capex / tenk_diff / call_nlp / catalyst
+  Phase 0: Peer set 조회 + Peer XBRL 데이터 병렬 fetch (Agent 1-3 공유)
+  Phase 0.5: Agent 1-3용 정량 메트릭 사전 계산 (Python)
+  Phase 1: 6개 포렌식 에이전트 asyncio.gather 병렬 실행
+           Agent 1-3: precomputed context 포함 user prompt
+           Agent 4-6: 기존 방식 (직접 도구 호출)
   Phase 2: Orchestrator (claude-opus-4-6) — 6개 결과 종합,
            Forensic Score 산출, Tier 분류, Next Action 생성
 
 Forensic Score: 0(최악/가장 의심) ~ 100(깨끗한 회계)
-  낮을수록 Short 후보에 가까움 — 기존 투자 추천 시스템과 방향 반전.
+  낮을수록 Short 후보에 가까움.
 
 Tier:
   1 = Active Short  (0~30)
@@ -36,7 +44,13 @@ from claude_agent_sdk import (
     TextBlock,
 )
 
-from agents import AGENT_REGISTRY, AGENT_LABELS, FORENSIC_DATA_SERVER, build_options
+from agents import (
+    AGENT_REGISTRY, AGENT_LABELS, FORENSIC_DATA_SERVER,
+    build_options, QUANTITATIVE_AGENTS,
+)
+from peer_set import get_peer_set, get_sector_group
+from quant_metrics import agent1_precomputed, agent2_precomputed, agent3_precomputed
+import data_sources as ds
 
 
 # ---------------------------------------------------------------------------
@@ -125,23 +139,137 @@ def _extract_summary_json(text: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Phase 0: Peer Set 조회 + XBRL 데이터 병렬 fetch
+# ---------------------------------------------------------------------------
+
+async def fetch_single_xbrl(ticker: str, years: int = 5) -> dict[str, Any] | None:
+    """단일 종목 XBRL 데이터 fetch (에러 시 None 반환).
+
+    5년 데이터로 확장 — Sloan 8분기 시계열 계산에 충분한 데이터 확보.
+    """
+    try:
+        return await ds.sec_xbrl_financials(ticker, years=years)
+    except Exception as e:
+        print(f"    ⚠ XBRL fetch 실패 [{ticker}]: {type(e).__name__}: {e}", flush=True)
+        return None
+
+
+async def fetch_peer_xbrl_batch(
+    ticker: str,
+    peers: list[str],
+    years: int = 3,
+) -> dict[str, dict[str, Any]]:
+    """Peer 종목 XBRL 데이터 병렬 fetch.
+
+    Args:
+        ticker: 기준 종목 (로그용)
+        peers:  peer ticker 리스트
+        years:  연간 기간 수
+
+    Returns:
+        {peer_ticker: xbrl_ts_dict} — fetch 실패한 peer는 포함 안 됨
+    """
+    if not peers:
+        return {}
+
+    print(
+        f"    📊 Peer XBRL fetch: {', '.join(peers)} (연간 {years}년) …",
+        flush=True,
+    )
+    tasks = {p: fetch_single_xbrl(p, years=years) for p in peers}
+    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+    peer_data: dict[str, dict] = {}
+    for peer, result in zip(tasks.keys(), results):
+        if isinstance(result, dict):
+            peer_data[peer] = result
+        # Exception / None → 제외
+
+    print(
+        f"    ✓ Peer 데이터 수집: {len(peer_data)}/{len(peers)}개 성공",
+        flush=True,
+    )
+    return peer_data
+
+
+# ---------------------------------------------------------------------------
+# Phase 0.5: Agent 1-3 정량 메트릭 사전 계산
+# ---------------------------------------------------------------------------
+
+def compute_precomputed_context(
+    agent_key: str,
+    ts: dict[str, Any],
+    peer_ts_map: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    """에이전트별 사전 계산 컨텍스트 생성.
+
+    Args:
+        agent_key:   "accruals" | "revenue" | "capex"
+        ts:          기준 종목 XBRL 시계열
+        peer_ts_map: peer 종목 XBRL 시계열 맵
+
+    Returns:
+        사전 계산된 메트릭 dict, 또는 None (미지원 에이전트)
+    """
+    if agent_key == "accruals":
+        return agent1_precomputed(ts, peer_ts_map)
+    elif agent_key == "revenue":
+        return agent2_precomputed(ts, peer_ts_map)
+    elif agent_key == "capex":
+        return agent3_precomputed(ts, peer_ts_map)
+    return None
+
+
+def build_precomputed_prompt(
+    ticker: str,
+    precomputed: dict[str, Any],
+    peers: list[str],
+) -> str:
+    """사전 계산 메트릭을 user prompt로 변환."""
+    peers_str = ", ".join(peers) if peers else "없음"
+    metrics_json = json.dumps(precomputed, ensure_ascii=False, indent=2)
+    return (
+        f"Ticker: {ticker} (US market)\n\n"
+        f"## Peer Set (z-score 계산 기준)\n{peers_str}\n\n"
+        f"## 사전 계산된 정량 지표 (Python quant_metrics.py 산출)\n"
+        f"```json\n{metrics_json}\n```\n\n"
+        f"위 지표를 분석의 출발점으로 사용하세요. "
+        f"flag=True 항목에 대해 10-K 텍스트 증거를 반드시 확인하세요. "
+        f"분석 결과를 Korean markdown + ## SUMMARY_JSON 형식으로 출력하세요."
+    )
+
+
+# ---------------------------------------------------------------------------
 # 단일 에이전트 실행
 # ---------------------------------------------------------------------------
 
 async def run_single_agent(
     agent_key: str,
     ticker: str,
+    precomputed: dict[str, Any] | None = None,
 ) -> AgentReport:
-    """ClaudeSDKClient로 포렌식 에이전트 하나 실행."""
+    """ClaudeSDKClient로 포렌식 에이전트 하나 실행.
+
+    Args:
+        agent_key:   에이전트 키 (AGENT_REGISTRY)
+        ticker:      분석 대상 티커
+        precomputed: Agent 1-3용 사전 계산 메트릭 (None이면 기존 방식)
+    """
     started = time.perf_counter()
 
-    user_prompt = (
-        f"Ticker: {ticker} (US market)\n\n"
-        f"Perform your specialized forensic analysis on this company. "
-        f"Call the necessary tools, analyze the data rigorously, "
-        f"and output your findings in Korean markdown followed by "
-        f"the required `## SUMMARY_JSON` block."
-    )
+    if precomputed is not None:
+        # Agent 1-3: 사전 계산 컨텍스트 포함 (세션 4 방식)
+        peers = precomputed.get("peer_tickers", [])
+        user_prompt = build_precomputed_prompt(ticker, precomputed, peers)
+    else:
+        # Agent 4-6: 기존 방식 (LLM이 도구 직접 호출)
+        user_prompt = (
+            f"Ticker: {ticker} (US market)\n\n"
+            f"Perform your specialized forensic analysis on this company. "
+            f"Call the necessary tools, analyze the data rigorously, "
+            f"and output your findings in Korean markdown followed by "
+            f"the required `## SUMMARY_JSON` block."
+        )
 
     try:
         options = build_options(agent_key)
@@ -177,7 +305,6 @@ async def run_single_agent(
 # Forensic Score 계산 (sub-score 가중 합산)
 # ---------------------------------------------------------------------------
 
-# 기본 가중치 (섹터/종목 특성에 따라 Orchestrator가 조정 가능)
 DEFAULT_WEIGHTS: dict[str, float] = {
     "accruals_score":        0.20,
     "revenue_quality_score": 0.20,
@@ -201,11 +328,7 @@ def calculate_forensic_score(
     result: "ForensicResult",
     weights: dict[str, float] | None = None,
 ) -> dict[str, Any]:
-    """6개 sub-score → 가중 합산 Forensic Score + Tier 분류.
-
-    Forensic Score: 0(최악) ~ 100(깨끗한 회계).
-    낮을수록 Short 후보에 가까움.
-    """
+    """6개 sub-score → 가중 합산 Forensic Score + Tier 분류."""
     w = weights or DEFAULT_WEIGHTS
     sub_scores: dict[str, dict] = {}
     weighted_total = 0.0
@@ -242,14 +365,12 @@ def calculate_forensic_score(
                 "error": err,
             }
 
-    # 정상 sub-score 비율로 rescale
     forensic_score: int | None = None
     if weight_used > 0:
         forensic_score = round(weighted_total / weight_used)
 
     tier, tier_label = classify_tier(forensic_score)
 
-    # 전체 red flags 취합
     all_red_flags: list[dict] = []
     for agent_key, score_key in SCORE_KEY_MAP.items():
         flags = sub_scores.get(score_key, {}).get("red_flags", [])
@@ -272,13 +393,7 @@ def calculate_forensic_score(
 
 
 def classify_tier(forensic_score: int | None) -> tuple[int, str]:
-    """Forensic Score → Tier 분류.
-
-    Tier 1 (0~30):  Active Short — 복수의 hard red flag
-    Tier 2 (31~55): Monitor — 단서 포착, 추적 유지
-    Tier 3 (56~70): Avoid — yellow flag, 신규 포지션 자제
-    Tier 4 (71~100): Archive — 현재 forensic 신호 없음
-    """
+    """Forensic Score → Tier 분류."""
     if forensic_score is None:
         return 0, "Unknown"
     if forensic_score <= 30:
@@ -291,7 +406,7 @@ def classify_tier(forensic_score: int | None) -> tuple[int, str]:
 
 
 # ---------------------------------------------------------------------------
-# ForensicResult → DB 호환 dict 변환 (api.py에서 사용)
+# ForensicResult → DB 호환 dict 변환
 # ---------------------------------------------------------------------------
 
 def forensic_result_to_dict(
@@ -299,21 +414,11 @@ def forensic_result_to_dict(
     skip_orchestrator: bool = False,
     duration_sec: float | None = None,
 ) -> dict[str, Any]:
-    """ForensicResult 객체 → db.save_result() 호환 dict.
-
-    api.py의 _run_analysis() 에서 analyze_stock() 반환값을
-    DB에 저장하기 전 변환할 때 사용.
-
-    Returns:
-        dict with keys: ticker, forensic_score, tier, tier_label,
-        short_thesis, skip_orchestrator, weights, error,
-        duration_sec, agent_reports (list[dict])
-    """
+    """ForensicResult → db.save_result() 호환 dict."""
     sc   = calculate_forensic_score(result)
     orch = result.reports.get("Orchestrator")
     orch_summary = orch.summary if orch and not orch.error else {}
 
-    # agent_reports: db.py save_result 포맷에 맞게 변환
     agent_reports: list[dict] = []
     for agent_key, score_key in SCORE_KEY_MAP.items():
         r = result.reports.get(agent_key)
@@ -344,18 +449,11 @@ def forensic_result_to_dict(
 # ---------------------------------------------------------------------------
 
 async def run_orchestrator(result: "ForensicResult") -> AgentReport:
-    """Claude Opus(claude-opus-4-6)로 6개 에이전트 결과를 종합.
-
-    - Forensic Score 가중치 조정 (섹터 특성 반영)
-    - Sub-score 타당성 검토
-    - 핵심 red flag 3~5개 종합
-    - Next action 권고
-    """
+    """Claude Opus(claude-opus-4-6)로 6개 에이전트 결과를 종합."""
     started = time.perf_counter()
 
     pre_score = calculate_forensic_score(result)
 
-    # 에이전트 섹션 취합
     sections: list[str] = []
     for agent_key in ["accruals", "revenue", "capex", "tenk_diff", "call_nlp", "catalyst"]:
         r = result.reports.get(agent_key)
@@ -372,6 +470,7 @@ async def run_orchestrator(result: "ForensicResult") -> AgentReport:
 
     prompt = f"""당신은 Chanos-Schilit 전통의 포렌식 회계 수석 애널리스트입니다.
 6개 전문 에이전트가 **{result.ticker}** (미국 AI 인프라 섹터)를 분석한 결과입니다.
+Agent 1-3은 Python 사전 계산 메트릭(Peer z-score 포함)을 기반으로 분석했습니다.
 
 {combined}
 
@@ -388,6 +487,7 @@ async def run_orchestrator(result: "ForensicResult") -> AgentReport:
 
 ### 1. 핵심 회계 품질 이슈 (상위 3~5개)
 각 이슈마다: 에이전트 출처 / 수치 근거 / 심각도(HIGH/MEDIUM/LOW) 명시.
+Peer z-score가 있는 경우 peer 대비 위치도 언급.
 
 ### 2. Tier 분류 근거
 사전 계산된 Score와 Tier를 검토하고, 필요시 가중치를 조정하여 최종 Tier를 확정하세요.
@@ -399,7 +499,6 @@ Tier 3~4라면: 모니터링 중단 근거.
 
 ### 4. Next Action
 구체적인 날짜 또는 이벤트 기반 액션 아이템 2~3개.
-예: "Q3 2026 10-Q 제출 시 capex/dep ratio 재확인", "다음 어닝스 콜에서 KPI 목록 추적"
 
 ## SUMMARY_JSON
 {{
@@ -416,7 +515,7 @@ Tier 3~4라면: 모니터링 중단 근거.
     "catalyst_score":        {{"score": <int|null>, "weight": <float>, "weighted": <float|null>}}
   }},
   "red_flags": [
-    {{"agent": "<label>", "severity": "HIGH|MEDIUM|LOW", "flag": "<specific finding>", "evidence": "<数字 or quote>"}}
+    {{"agent": "<label>", "severity": "HIGH|MEDIUM|LOW", "flag": "<finding>", "evidence": "<数字 or quote>"}}
   ],
   "next_action": {{
     "priority": "HIGH|MEDIUM|LOW",
@@ -458,11 +557,7 @@ def export_to_excel(
     results: list["ForensicResult"],
     output_path: str | None = None,
 ) -> str:
-    """포렌식 분석 결과를 reports/forensic_candidates.xlsx에 저장 (누적).
-
-    Returns:
-        저장된 파일 경로 문자열.
-    """
+    """포렌식 분석 결과를 reports/forensic_candidates.xlsx에 저장 (누적)."""
     try:
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment
@@ -529,11 +624,8 @@ def export_to_excel(
         next_action_str = " | ".join(next_actions[:2]) if next_actions else ""
 
         row: list[Any] = [
-            now_str,
-            res.ticker,
-            sc["forensic_score"],
-            sc["tier"],
-            sc["tier_label"],
+            now_str, res.ticker,
+            sc["forensic_score"], sc["tier"], sc["tier_label"],
             orch_summary.get("confidence", ""),
             sub.get("accruals_score", {}).get("score"),
             sub.get("revenue_quality_score", {}).get("score"),
@@ -541,9 +633,7 @@ def export_to_excel(
             sub.get("tenk_diff_score", {}).get("score"),
             sub.get("call_nlp_score", {}).get("score"),
             sub.get("catalyst_score", {}).get("score"),
-            _flag(0),
-            _flag(1),
-            _flag(2),
+            _flag(0), _flag(1), _flag(2),
             next_action_str,
         ]
         ws.append(row)
@@ -551,7 +641,7 @@ def export_to_excel(
         row_num = ws.max_row
         tier_val = sc["tier"]
         color = TIER_COLORS.get(tier_val, "FFFFFF")
-        for col in (3, 4, 5):  # Score, Tier, Tier Label 셀 색상
+        for col in (3, 4, 5):
             cell = ws.cell(row_num, col)
             cell.fill = PatternFill("solid", fgColor=color)
             if tier_val <= 2:
@@ -562,7 +652,7 @@ def export_to_excel(
 
 
 # ---------------------------------------------------------------------------
-# 전체 파이프라인: 6개 병렬 → Opus 총괄
+# 전체 파이프라인: Phase 0 → Phase 0.5 → Phase 1 → Phase 2
 # ---------------------------------------------------------------------------
 
 async def analyze_stock(
@@ -571,55 +661,110 @@ async def analyze_stock(
 ) -> "ForensicResult":
     """6개 포렌식 에이전트 병렬 실행 → Opus 총괄.
 
+    Session 4 개선:
+      Phase 0:   Peer 데이터 병렬 fetch (Agent 1-3 공유)
+      Phase 0.5: 정량 메트릭 사전 계산 (Python)
+      Phase 1:   6-agent 병렬 실행 (Agent 1-3: precomputed context 포함)
+      Phase 2:   Opus 총괄
+
     Args:
         ticker:            미국 종목 티커 (예: NVDA, MSFT, SMCI)
         skip_orchestrator: True면 Opus 총괄 단계 스킵 (빠른 실행)
     """
     started = time.perf_counter()
-    agent_keys = list(AGENT_REGISTRY.keys())
+    ticker = ticker.upper().strip()
 
-    # Phase 1: 6개 에이전트 전부 병렬 실행 (순차 의존성 없음)
+    # -----------------------------------------------------------------
+    # Phase 0: Peer Set 조회 + 기준 종목 & Peer XBRL 병렬 fetch
+    # -----------------------------------------------------------------
+    print(f"  🔍 [{ticker}] Phase 0: Peer set 조회 + XBRL 데이터 fetch …", flush=True)
+
+    sector = get_sector_group(ticker)
+    peers  = await get_peer_set(ticker, sector)
+    print(f"    Sector: {sector} | Peers: {peers or '없음'}", flush=True)
+
+    # 기준 종목 + peer 동시 fetch (5년 데이터)
+    fetch_tasks: dict[str, Any] = {"__self__": fetch_single_xbrl(ticker, years=5)}
+    for p in peers:
+        fetch_tasks[p] = fetch_single_xbrl(p, years=3)
+
+    fetch_results = await asyncio.gather(*fetch_tasks.values(), return_exceptions=True)
+    fetch_map = dict(zip(fetch_tasks.keys(), fetch_results))
+
+    self_ts = fetch_map.get("__self__")
+    if isinstance(self_ts, Exception) or self_ts is None:
+        print(f"    ⚠ [{ticker}] 기준 XBRL fetch 실패 — precomputed 메트릭 없이 진행", flush=True)
+        self_ts = None
+
+    peer_ts_map: dict[str, dict] = {
+        p: v for p, v in fetch_map.items()
+        if p != "__self__" and isinstance(v, dict)
+    }
     print(
-        f"  ⚡ [{ticker}] Phase 1: {len(agent_keys)}개 포렌식 에이전트 병렬 실행 중...",
+        f"    ✓ XBRL 수집 완료: self={'OK' if self_ts else 'FAIL'}, "
+        f"peers={len(peer_ts_map)}/{len(peers)}",
         flush=True,
     )
-    tasks = [run_single_agent(k, ticker) for k in agent_keys]
+
+    # -----------------------------------------------------------------
+    # Phase 0.5: Agent 1-3 정량 메트릭 사전 계산
+    # -----------------------------------------------------------------
+    precomputed_map: dict[str, dict | None] = {}
+    if self_ts:
+        print(f"  ⚙  [{ticker}] Phase 0.5: 정량 메트릭 사전 계산 …", flush=True)
+        for key in ("accruals", "revenue", "capex"):
+            try:
+                precomputed_map[key] = compute_precomputed_context(key, self_ts, peer_ts_map)
+                flags_count = _count_flags(precomputed_map[key])
+                print(f"    ✓ {key}: {flags_count}개 flag 발견", flush=True)
+            except Exception as e:
+                print(f"    ⚠ {key} 사전 계산 실패: {e}", flush=True)
+                precomputed_map[key] = None
+    else:
+        precomputed_map = {"accruals": None, "revenue": None, "capex": None}
+
+    # -----------------------------------------------------------------
+    # Phase 1: 6개 에이전트 병렬 실행
+    # -----------------------------------------------------------------
+    agent_keys = list(AGENT_REGISTRY.keys())
+    print(
+        f"  ⚡ [{ticker}] Phase 1: {len(agent_keys)}개 포렌식 에이전트 병렬 실행 …",
+        flush=True,
+    )
+
+    tasks = []
+    for k in agent_keys:
+        precomputed = precomputed_map.get(k)  # Agent 4-6은 None
+        tasks.append(run_single_agent(k, ticker, precomputed=precomputed))
+
     phase1_reports = await asyncio.gather(*tasks)
     reports: dict[str, AgentReport] = {r.agent: r for r in phase1_reports}
 
     for r in phase1_reports:
         status = "✓" if not r.error else "✗"
-        score = r.summary.get(
-            f"{r.agent}_score",
-            r.summary.get("accruals_score",
-            r.summary.get("revenue_quality_score",
-            r.summary.get("capex_score",
-            r.summary.get("tenk_diff_score",
-            r.summary.get("call_nlp_score",
-            r.summary.get("catalyst_score", "?")))))),
-        )
+        score_val = _get_score_from_summary(r.agent, r.summary)
         print(
-            f"    {status} {r.agent:<12} {r.elapsed_sec:.1f}s  score={score}",
+            f"    {status} {r.agent:<12} {r.elapsed_sec:.1f}s  score={score_val}",
             flush=True,
         )
 
+    # -----------------------------------------------------------------
     # Phase 2: Opus 총괄
+    # -----------------------------------------------------------------
     if not skip_orchestrator:
         interim = ForensicResult(
             ticker=ticker,
             elapsed_sec=time.perf_counter() - started,
             reports=reports,
         )
-        print(f"  🔬 [{ticker}] Phase 2: Opus 총괄 분석 중...", flush=True)
+        print(f"  🔬 [{ticker}] Phase 2: Opus 총괄 분석 …", flush=True)
         orch_report = await run_orchestrator(interim)
         reports["Orchestrator"] = orch_report
 
-        fs = calculate_forensic_score(
-            ForensicResult(ticker, 0, reports)
-        )
+        fs = calculate_forensic_score(ForensicResult(ticker, 0, reports))
         orch_summary = orch_report.summary
         final_score = orch_summary.get("forensic_score", fs["forensic_score"])
-        final_tier = orch_summary.get("tier_label", fs["tier_label"])
+        final_tier  = orch_summary.get("tier_label", fs["tier_label"])
         print(
             f"    ✓ Orchestrator  {orch_report.elapsed_sec:.1f}s  "
             f"Score={final_score}  Tier={final_tier}",
@@ -641,11 +786,8 @@ async def analyze_stocks(
 ) -> list["ForensicResult"]:
     """여러 종목 동시 분석 (종목 간 병렬).
 
-    Args:
-        tickers:           미국 종목 티커 리스트
-        skip_orchestrator: Opus 총괄 스킵
-        save_excel:        True면 reports/forensic_candidates.xlsx 저장
-        excel_path:        Excel 저장 경로 (None=기본값)
+    각 종목은 독립적으로 Phase 0~2 전체를 실행.
+    종목 간 peer 중복 fetch는 허용 (캐시 없음; 개선 여지 있음).
     """
     print(
         f"🚀 {len(tickers)}개 종목 동시 포렌식 분석 시작: {', '.join(tickers)}",
@@ -662,3 +804,37 @@ async def analyze_stocks(
         print(f"\n💾 Excel 저장 완료: {path}", flush=True)
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# 내부 헬퍼
+# ---------------------------------------------------------------------------
+
+def _count_flags(precomputed: dict | None) -> int:
+    """사전 계산 딕셔너리에서 flag=True 항목 수 계산."""
+    if not precomputed:
+        return 0
+    count = 0
+    for v in precomputed.values():
+        if isinstance(v, dict):
+            if v.get("flag") is True:
+                count += 1
+            # 중첩 dict (latest 등)
+            latest = v.get("latest")
+            if isinstance(latest, dict) and latest.get("flag") is True:
+                count += 1
+    return count
+
+
+def _get_score_from_summary(agent: str, summary: dict) -> Any:
+    """에이전트별 score 키 자동 탐색."""
+    key_order = [
+        f"{agent}_score",
+        "accruals_score", "revenue_quality_score", "capex_score",
+        "tenk_diff_score", "call_nlp_score", "catalyst_score",
+    ]
+    for key in key_order:
+        val = summary.get(key)
+        if val is not None:
+            return val
+    return "?"
