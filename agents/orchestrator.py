@@ -5,12 +5,17 @@ Session 4 업데이트:
   - Peer 데이터 한 번만 fetch하고 Agent 1-3 공유
   - peer_set.py + quant_metrics.py 연동
 
+Session 5 업데이트:
+  - Agent 4: diff_analyzer.py Language Evolution Memo 사전 생성 추가
+  - Phase 0.5에서 Agent 1-3 정량 메트릭 + Agent 4 Language Diff Memo 동시 계산
+
 흐름:
   Phase 0: Peer set 조회 + Peer XBRL 데이터 병렬 fetch (Agent 1-3 공유)
-  Phase 0.5: Agent 1-3용 정량 메트릭 사전 계산 (Python)
+  Phase 0.5: Agent 1-3용 정량 메트릭 + Agent 4 Language Diff Memo 사전 계산 (Python)
   Phase 1: 6개 포렌식 에이전트 asyncio.gather 병렬 실행
-           Agent 1-3: precomputed context 포함 user prompt
-           Agent 4-6: 기존 방식 (직접 도구 호출)
+           Agent 1-3: precomputed 정량 메트릭 context 포함 user prompt
+           Agent 4: Language Evolution Memo 포함 user prompt
+           Agent 5-6: 기존 방식 (직접 도구 호출)
   Phase 2: Orchestrator (claude-opus-4-6) — 6개 결과 종합,
            Forensic Score 산출, Tier 분류, Next Action 생성
 
@@ -51,6 +56,13 @@ from agents import (
 from peer_set import get_peer_set, get_sector_group
 from quant_metrics import agent1_precomputed, agent2_precomputed, agent3_precomputed
 import data_sources as ds
+
+# diff_analyzer는 선택적 import (anthropic SDK 필요)
+try:
+    from diff_analyzer import analyze_diff_with_llm
+    _DIFF_ANALYZER_AVAILABLE = True
+except ImportError:
+    _DIFF_ANALYZER_AVAILABLE = False
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +217,7 @@ def compute_precomputed_context(
 
     Args:
         agent_key:   "accruals" | "revenue" | "capex"
+                     ("tenk_diff" 는 compute_diff_memo() 사용)
         ts:          기준 종목 XBRL 시계열
         peer_ts_map: peer 종목 XBRL 시계열 맵
 
@@ -220,12 +233,122 @@ def compute_precomputed_context(
     return None
 
 
+async def compute_diff_memo(
+    ticker: str,
+    peer_context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Agent 4 전용: diff_analyzer.py로 Language Evolution Memo 생성.
+
+    SEC EDGAR에서 10-K 섹션을 fetch하고 forensic_engine + diff_analyzer로 분석.
+
+    Args:
+        ticker:       종목 코드
+        peer_context: 동종업체 비교 데이터 (선택)
+
+    Returns:
+        analyze_diff_with_llm() 결과 dict, 또는 None (실패 시)
+    """
+    if not _DIFF_ANALYZER_AVAILABLE:
+        print("    ⚠ diff_analyzer 사용 불가 (anthropic 패키지 필요)", flush=True)
+        return None
+
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        print("    ⚠ ANTHROPIC_API_KEY 없음 — diff memo 스킵", flush=True)
+        return None
+
+    try:
+        print(f"    📄 [{ticker}] 10-K 섹션 fetch (current + prior year) …", flush=True)
+        # 현재 연도와 전년도 10-K 섹션 병렬 fetch
+        sections_to_fetch = [
+            "risk_factors",
+            "mda",
+            "critical_accounting",
+            "related_party",
+        ]
+        current_raw, prior_raw = await asyncio.gather(
+            ds.sec_10k_sections(
+                ticker,
+                prior_year=False,
+                sections=sections_to_fetch,
+                max_chars_per_section=5000,
+            ),
+            ds.sec_10k_sections(
+                ticker,
+                prior_year=True,
+                sections=sections_to_fetch,
+                max_chars_per_section=5000,
+            ),
+        )
+
+        # 섹션 이름 정규화 (key mapping)
+        _SEC_SECTION_MAP = {
+            "risk_factors":          "item_1a_risk_factors",
+            "mda":                   "md_and_a",
+            "critical_accounting":   "critical_accounting_estimates",
+            "related_party":         "related_party_transactions",
+        }
+
+        def _extract_sections(raw: dict) -> dict[str, str]:
+            secs = raw.get("sections") if isinstance(raw, dict) else {}
+            if not isinstance(secs, dict):
+                return {}
+            out = {}
+            for k, v in secs.items():
+                normalized = _SEC_SECTION_MAP.get(k, k)
+                text = v if isinstance(v, str) else str(v)
+                if text and text.strip():
+                    out[normalized] = text
+            return out
+
+        sections_current = _extract_sections(current_raw)
+        sections_prior   = _extract_sections(prior_raw)
+
+        if not sections_current or not sections_prior:
+            print(f"    ⚠ [{ticker}] 10-K 섹션 fetch 결과 비어있음", flush=True)
+            return None
+
+        # fy 정보 추출
+        fy_current = current_raw.get("fy", "FY_CURRENT") if isinstance(current_raw, dict) else "FY_CURRENT"
+        fy_prior   = prior_raw.get("fy", "FY_PRIOR")   if isinstance(prior_raw,   dict) else "FY_PRIOR"
+
+        print(
+            f"    📝 [{ticker}] Language Diff 분석: "
+            f"{len(sections_current)} 섹션 (current) / "
+            f"{len(sections_prior)} 섹션 (prior) …",
+            flush=True,
+        )
+
+        # forensic_engine + diff_analyzer 실행
+        from diff_analyzer import render_memo_from_sections
+        memo = await render_memo_from_sections(
+            ticker=ticker,
+            sections_current=sections_current,
+            sections_prior=sections_prior,
+            fy_current=str(fy_current),
+            fy_prior=str(fy_prior),
+            peer_context=peer_context or {},
+            use_opus_executive=False,
+        )
+
+        high = memo.get("high_count", 0)
+        cost = memo.get("total_cost_usd", 0)
+        print(
+            f"    ✓ [{ticker}] Language Diff Memo: HIGH={high}  cost=${cost:.5f}",
+            flush=True,
+        )
+        return memo
+
+    except Exception as e:
+        print(f"    ⚠ [{ticker}] diff memo 생성 실패: {type(e).__name__}: {e}", flush=True)
+        return None
+
+
 def build_precomputed_prompt(
     ticker: str,
     precomputed: dict[str, Any],
     peers: list[str],
 ) -> str:
-    """사전 계산 메트릭을 user prompt로 변환."""
+    """사전 계산 메트릭을 user prompt로 변환 (Agent 1-3용)."""
     peers_str = ", ".join(peers) if peers else "없음"
     metrics_json = json.dumps(precomputed, ensure_ascii=False, indent=2)
     return (
@@ -239,6 +362,75 @@ def build_precomputed_prompt(
     )
 
 
+def build_diff_memo_prompt(
+    ticker: str,
+    memo: dict[str, Any],
+) -> str:
+    """Language Evolution Memo를 Agent 4 user prompt로 변환.
+
+    Args:
+        ticker: 종목 코드
+        memo:   diff_analyzer.analyze_diff_with_llm() 결과 dict
+
+    Returns:
+        Agent 4 user_prompt 문자열
+    """
+    fy_current = memo.get("fy_current", "FY_CURRENT")
+    fy_prior   = memo.get("fy_prior",   "FY_PRIOR")
+    high_count = memo.get("high_count", 0)
+    cost       = memo.get("total_cost_usd", 0)
+    findings   = memo.get("findings", [])
+    cls_list   = memo.get("classifications", [])
+
+    # findings JSON (간결 버전)
+    findings_brief = []
+    for f in findings:
+        findings_brief.append({
+            "no":             f.get("finding_no"),
+            "section":        f.get("section_name"),
+            "title":          f.get("finding_title"),
+            "priority":       f.get("priority"),
+            "verdict":        f.get("verdict"),
+            "prior_quote":    f.get("fy_prior_quote", "")[:150],
+            "current_quote":  f.get("fy_current_quote", "")[:150],
+            "impact":         f.get("impact_estimate"),
+            "kill_criteria":  f.get("kill_criteria"),
+        })
+
+    # Stage 1 분류 요약
+    cls_brief = [
+        {
+            "section": c.get("section_name"),
+            "type":    c.get("change_type"),
+            "severity": c.get("severity"),
+            "summary": c.get("one_liner"),
+        }
+        for c in cls_list
+    ]
+
+    findings_json = json.dumps(findings_brief, ensure_ascii=False, indent=2)
+    cls_json      = json.dumps(cls_brief, ensure_ascii=False, indent=2)
+    memo_md       = memo.get("memo_markdown", "")[:4000]  # Markdown 일부 포함
+
+    return (
+        f"Ticker: {ticker} (US market)\n"
+        f"10-K Language Diff: {fy_prior} → {fy_current}\n\n"
+        f"## 사전 생성된 Language Evolution Memo\n"
+        f"- 분석 모델: Stage1={memo.get('model_used_stage1', 'Haiku')} / "
+        f"Stage2={memo.get('model_used_stage2', 'Sonnet')}\n"
+        f"- 비용: ${cost:.5f}  |  HIGH findings: {high_count}\n\n"
+        f"### Stage 1 섹션 분류 결과\n"
+        f"```json\n{cls_json}\n```\n\n"
+        f"### Stage 2 Deep Analysis Findings\n"
+        f"```json\n{findings_json}\n```\n\n"
+        f"### Memo Markdown Preview\n"
+        f"{memo_md}\n\n"
+        f"---\n"
+        f"위 Memo를 검토하고, HIGH priority findings를 sec_10k_sections로 직접 확인하세요. "
+        f"최종 종합 판단과 ## SUMMARY_JSON을 Korean markdown 형식으로 출력하세요."
+    )
+
+
 # ---------------------------------------------------------------------------
 # 단일 에이전트 실행
 # ---------------------------------------------------------------------------
@@ -247,6 +439,7 @@ async def run_single_agent(
     agent_key: str,
     ticker: str,
     precomputed: dict[str, Any] | None = None,
+    diff_memo: dict[str, Any] | None = None,
 ) -> AgentReport:
     """ClaudeSDKClient로 포렌식 에이전트 하나 실행.
 
@@ -254,15 +447,19 @@ async def run_single_agent(
         agent_key:   에이전트 키 (AGENT_REGISTRY)
         ticker:      분석 대상 티커
         precomputed: Agent 1-3용 사전 계산 메트릭 (None이면 기존 방식)
+        diff_memo:   Agent 4용 Language Evolution Memo (None이면 기존 방식)
     """
     started = time.perf_counter()
 
-    if precomputed is not None:
-        # Agent 1-3: 사전 계산 컨텍스트 포함 (세션 4 방식)
+    if agent_key == "tenk_diff" and diff_memo is not None:
+        # Agent 4: Language Evolution Memo 포함 (Session 5 방식)
+        user_prompt = build_diff_memo_prompt(ticker, diff_memo)
+    elif precomputed is not None:
+        # Agent 1-3: 사전 계산 컨텍스트 포함 (Session 4 방식)
         peers = precomputed.get("peer_tickers", [])
         user_prompt = build_precomputed_prompt(ticker, precomputed, peers)
     else:
-        # Agent 4-6: 기존 방식 (LLM이 도구 직접 호출)
+        # Agent 5-6 (또는 diff_memo 없는 Agent 4): 기존 방식 (LLM이 도구 직접 호출)
         user_prompt = (
             f"Ticker: {ticker} (US market)\n\n"
             f"Perform your specialized forensic analysis on this company. "
@@ -707,11 +904,13 @@ async def analyze_stock(
     )
 
     # -----------------------------------------------------------------
-    # Phase 0.5: Agent 1-3 정량 메트릭 사전 계산
+    # Phase 0.5: Agent 1-3 정량 메트릭 + Agent 4 Language Diff Memo 사전 계산
     # -----------------------------------------------------------------
     precomputed_map: dict[str, dict | None] = {}
+    diff_memo: dict[str, Any] | None = None
+
     if self_ts:
-        print(f"  ⚙  [{ticker}] Phase 0.5: 정량 메트릭 사전 계산 …", flush=True)
+        print(f"  ⚙  [{ticker}] Phase 0.5: 정량 메트릭 + Language Diff Memo 사전 계산 …", flush=True)
         for key in ("accruals", "revenue", "capex"):
             try:
                 precomputed_map[key] = compute_precomputed_context(key, self_ts, peer_ts_map)
@@ -722,6 +921,14 @@ async def analyze_stock(
                 precomputed_map[key] = None
     else:
         precomputed_map = {"accruals": None, "revenue": None, "capex": None}
+
+    # Agent 4: Language Diff Memo (병렬로 실행 — XBRL fetch와 별개)
+    # peer_context: Agent 1-3 precomputed에서 peer 정보 추출
+    peer_context_for_diff = {
+        "peers": peers,
+        "sector": sector,
+    }
+    diff_memo = await compute_diff_memo(ticker, peer_context=peer_context_for_diff)
 
     # -----------------------------------------------------------------
     # Phase 1: 6개 에이전트 병렬 실행
@@ -734,8 +941,9 @@ async def analyze_stock(
 
     tasks = []
     for k in agent_keys:
-        precomputed = precomputed_map.get(k)  # Agent 4-6은 None
-        tasks.append(run_single_agent(k, ticker, precomputed=precomputed))
+        precomputed = precomputed_map.get(k)     # Agent 1-3: dict, Agent 4-6: None
+        memo = diff_memo if k == "tenk_diff" else None  # Agent 4만 memo 전달
+        tasks.append(run_single_agent(k, ticker, precomputed=precomputed, diff_memo=memo))
 
     phase1_reports = await asyncio.gather(*tasks)
     reports: dict[str, AgentReport] = {r.agent: r for r in phase1_reports}
