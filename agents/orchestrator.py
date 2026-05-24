@@ -55,6 +55,8 @@ from agents import (
 )
 from peer_set import get_peer_set, get_sector_group
 from quant_metrics import agent1_precomputed, agent2_precomputed, agent3_precomputed
+from call_metrics import agent5_precomputed
+from catalyst_monitor import agent6_precomputed
 import data_sources as ds
 
 # diff_analyzer는 선택적 import (anthropic SDK 필요)
@@ -435,31 +437,97 @@ def build_diff_memo_prompt(
 # 단일 에이전트 실행
 # ---------------------------------------------------------------------------
 
+def build_call_metrics_prompt(ticker: str, call_precomputed: dict[str, Any]) -> str:
+    """Agent 5 전용: call_metrics 사전 계산 결과 → user prompt."""
+    quarters = call_precomputed.get("quarters_analyzed", 0)
+    data_src  = call_precomputed.get("data_source", "unknown")
+    summary   = call_precomputed.get("summary_text", "데이터 없음")
+
+    # 핵심 지표만 compact JSON으로
+    compact = {
+        "quarters_analyzed":    quarters,
+        "data_source":          data_src,
+        "kpi_trends":           call_precomputed.get("kpi_trends", {}),
+        "hedging_trend":        call_precomputed.get("hedging_trend", {}),
+        "confidence_trend":     call_precomputed.get("confidence_trend", {}),
+        "non_gaap_trend":       call_precomputed.get("non_gaap_trend", {}),
+        "guidance_quality_latest": call_precomputed.get("guidance_quality_latest", "ABSENT"),
+        "flags":                call_precomputed.get("flags", {}),
+        "qa_evasions":          call_precomputed.get("qa_evasions", [])[:5],  # 최대 5건
+    }
+    metrics_json = json.dumps(compact, ensure_ascii=False, indent=2)
+
+    return (
+        f"Ticker: {ticker} (US market)\n\n"
+        f"## 사전 계산된 Earnings Call 분석 (Python call_metrics.py)\n"
+        f"```json\n{metrics_json}\n```\n\n"
+        f"## 상세 요약\n{summary}\n\n"
+        f"위 사전 계산 결과를 출발점으로 분석하세요. "
+        f"flag=True 항목 중 포렌식적으로 중요한 것을 10-K 증거와 교차 확인하세요. "
+        f"결과를 Korean markdown + ## SUMMARY_JSON 형식으로 출력하세요."
+    )
+
+
+def build_catalyst_prompt(ticker: str, catalyst_precomputed: dict[str, Any]) -> str:
+    """Agent 6 전용: catalyst_monitor 사전 계산 결과 → user prompt."""
+    summary = catalyst_precomputed.get("summary_text", "데이터 없음")
+
+    compact = {
+        "has_active_catalyst":  catalyst_precomputed.get("has_active_catalyst", False),
+        "max_severity":         catalyst_precomputed.get("max_severity", 0),
+        "catalyst_probability": catalyst_precomputed.get("catalyst_probability", "NONE"),
+        "active_catalysts":     catalyst_precomputed.get("active_catalysts", [])[:6],
+        "insider_pattern":      catalyst_precomputed.get("insider_pattern", {}),
+        "flags":                catalyst_precomputed.get("flags", {}),
+    }
+    metrics_json = json.dumps(compact, ensure_ascii=False, indent=2)
+
+    return (
+        f"Ticker: {ticker} (US market)\n\n"
+        f"## 사전 계산된 Catalyst 이벤트 분류 (Python catalyst_monitor.py)\n"
+        f"```json\n{metrics_json}\n```\n\n"
+        f"## 상세 요약\n{summary}\n\n"
+        f"severity ≥ 80인 이벤트는 sec_8k_items / sec_corresp 호출로 원문을 확인하세요. "
+        f"compound_signal=True이면 반드시 상세 보고하세요. "
+        f"결과를 Korean markdown + ## SUMMARY_JSON 형식으로 출력하세요."
+    )
+
+
 async def run_single_agent(
     agent_key: str,
     ticker: str,
     precomputed: dict[str, Any] | None = None,
     diff_memo: dict[str, Any] | None = None,
+    call_precomputed: dict[str, Any] | None = None,
+    catalyst_precomputed: dict[str, Any] | None = None,
 ) -> AgentReport:
     """ClaudeSDKClient로 포렌식 에이전트 하나 실행.
 
     Args:
-        agent_key:   에이전트 키 (AGENT_REGISTRY)
-        ticker:      분석 대상 티커
-        precomputed: Agent 1-3용 사전 계산 메트릭 (None이면 기존 방식)
-        diff_memo:   Agent 4용 Language Evolution Memo (None이면 기존 방식)
+        agent_key:            에이전트 키 (AGENT_REGISTRY)
+        ticker:               분석 대상 티커
+        precomputed:          Agent 1-3용 사전 계산 메트릭 (None이면 기존 방식)
+        diff_memo:            Agent 4용 Language Evolution Memo
+        call_precomputed:     Agent 5용 Earnings Call 사전 계산
+        catalyst_precomputed: Agent 6용 Catalyst 사전 계산
     """
     started = time.perf_counter()
 
     if agent_key == "tenk_diff" and diff_memo is not None:
         # Agent 4: Language Evolution Memo 포함 (Session 5 방식)
         user_prompt = build_diff_memo_prompt(ticker, diff_memo)
+    elif agent_key == "call_nlp" and call_precomputed is not None:
+        # Agent 5: Earnings Call 사전 계산 포함 (Session 6 방식)
+        user_prompt = build_call_metrics_prompt(ticker, call_precomputed)
+    elif agent_key == "catalyst" and catalyst_precomputed is not None:
+        # Agent 6: Catalyst 사전 계산 포함 (Session 6 방식)
+        user_prompt = build_catalyst_prompt(ticker, catalyst_precomputed)
     elif precomputed is not None:
         # Agent 1-3: 사전 계산 컨텍스트 포함 (Session 4 방식)
         peers = precomputed.get("peer_tickers", [])
         user_prompt = build_precomputed_prompt(ticker, precomputed, peers)
     else:
-        # Agent 5-6 (또는 diff_memo 없는 Agent 4): 기존 방식 (LLM이 도구 직접 호출)
+        # fallback: LLM이 도구 직접 호출
         user_prompt = (
             f"Ticker: {ticker} (US market)\n\n"
             f"Perform your specialized forensic analysis on this company. "
@@ -566,7 +634,13 @@ def calculate_forensic_score(
     if weight_used > 0:
         forensic_score = round(weighted_total / weight_used)
 
-    tier, tier_label = classify_tier(forensic_score)
+    # has_active_catalyst: Agent 6 SUMMARY_JSON에서 추출
+    catalyst_report = result.reports.get("catalyst")
+    has_active_catalyst = False
+    if catalyst_report and not catalyst_report.error and catalyst_report.summary:
+        has_active_catalyst = bool(catalyst_report.summary.get("has_active_catalyst", False))
+
+    tier, tier_label = classify_tier(forensic_score, has_active_catalyst)
 
     all_red_flags: list[dict] = []
     for agent_key, score_key in SCORE_KEY_MAP.items():
@@ -583,22 +657,40 @@ def calculate_forensic_score(
         "forensic_score": forensic_score,
         "tier": tier,
         "tier_label": tier_label,
+        "has_active_catalyst": has_active_catalyst,
         "sub_scores": sub_scores,
         "red_flags": all_red_flags,
         "weight_coverage": round(weight_used, 2),
     }
 
 
-def classify_tier(forensic_score: int | None) -> tuple[int, str]:
-    """Forensic Score → Tier 분류."""
+def classify_tier(
+    forensic_score: int | None,
+    has_active_catalyst: bool = False,
+) -> tuple[int, str]:
+    """Forensic Score + Active Catalyst → Tier 분류.
+
+    Session 6 업데이트:
+      has_active_catalyst=True이면 score 기준 한 단계 상향 (더 위험하게 분류).
+
+    Tier:
+      1 = Active Short  (score ≤ 30, 또는 ≤ 55 + catalyst)
+      2 = Monitor       (score ≤ 55, 또는 ≤ 70 + catalyst)
+      3 = Long Avoid    (score ≤ 70)
+      4 = Archive       (score > 70)
+    """
     if forensic_score is None:
         return 0, "Unknown"
-    if forensic_score <= 30:
+
+    # catalyst 보정: score threshold를 25 완화 (더 쉽게 위험 등급)
+    effective = forensic_score - (15 if has_active_catalyst else 0)
+
+    if effective <= 30:
         return 1, "Active Short"
-    if forensic_score <= 55:
+    if effective <= 55:
         return 2, "Monitor"
-    if forensic_score <= 70:
-        return 3, "Avoid"
+    if effective <= 70:
+        return 3, "Long Avoid"
     return 4, "Archive"
 
 
@@ -855,39 +947,53 @@ def export_to_excel(
 async def analyze_stock(
     ticker: str,
     skip_orchestrator: bool = False,
+    transcripts: list[str] | None = None,
 ) -> "ForensicResult":
     """6개 포렌식 에이전트 병렬 실행 → Opus 총괄.
 
-    Session 4 개선:
-      Phase 0:   Peer 데이터 병렬 fetch (Agent 1-3 공유)
-      Phase 0.5: 정량 메트릭 사전 계산 (Python)
-      Phase 1:   6-agent 병렬 실행 (Agent 1-3: precomputed context 포함)
-      Phase 2:   Opus 총괄
+    Session 4: Agent 1-3 Python-first 정량 메트릭
+    Session 5: Agent 4 Language Diff Memo
+    Session 6: Agent 5 Earnings Call NLP + Agent 6 Catalyst Monitor
+
+    Phase 0:   Peer set 조회 + 기준 종목 & Peer XBRL + SEC 이벤트 데이터 병렬 fetch
+    Phase 0.5: 모든 사전 계산 (Agent 1-6) 병렬 실행
+    Phase 1:   6개 포렌식 에이전트 병렬 실행 (사전 계산 컨텍스트 포함)
+    Phase 2:   Opus 총괄
 
     Args:
         ticker:            미국 종목 티커 (예: NVDA, MSFT, SMCI)
         skip_orchestrator: True면 Opus 총괄 단계 스킵 (빠른 실행)
+        transcripts:       Earnings call transcript 텍스트 리스트 (없으면 SEC 8-K 사용)
     """
     started = time.perf_counter()
     ticker = ticker.upper().strip()
 
     # -----------------------------------------------------------------
-    # Phase 0: Peer Set 조회 + 기준 종목 & Peer XBRL 병렬 fetch
+    # Phase 0: Peer Set 조회 + 기준 종목 & Peer XBRL + SEC 이벤트 데이터 병렬 fetch
     # -----------------------------------------------------------------
-    print(f"  🔍 [{ticker}] Phase 0: Peer set 조회 + XBRL 데이터 fetch …", flush=True)
+    print(f"  🔍 [{ticker}] Phase 0: Peer set 조회 + 데이터 병렬 fetch …", flush=True)
 
     sector = get_sector_group(ticker)
     peers  = await get_peer_set(ticker, sector)
     print(f"    Sector: {sector} | Peers: {peers or '없음'}", flush=True)
 
-    # 기준 종목 + peer 동시 fetch (5년 데이터)
-    fetch_tasks: dict[str, Any] = {"__self__": fetch_single_xbrl(ticker, years=5)}
+    # XBRL + SEC 이벤트 데이터 동시 fetch
+    fetch_tasks: dict[str, Any] = {
+        "__self__":       fetch_single_xbrl(ticker, years=5),
+        "__8k__":         ds.sec_8k_items(ticker, items=["4.02","4.01","5.02","8.01","2.06"], days=365),
+        "__corresp__":    ds.sec_corresp(ticker, days=365),
+        "__form4__":      ds.sec_form4(ticker, days=90),
+        "__earnings__":   ds.sec_earnings_releases(ticker, quarters=6),
+    }
     for p in peers:
         fetch_tasks[p] = fetch_single_xbrl(p, years=3)
 
-    fetch_results = await asyncio.gather(*fetch_tasks.values(), return_exceptions=True)
+    fetch_results = await asyncio.gather(
+        *fetch_tasks.values(), return_exceptions=True
+    )
     fetch_map = dict(zip(fetch_tasks.keys(), fetch_results))
 
+    # XBRL 결과 분리
     self_ts = fetch_map.get("__self__")
     if isinstance(self_ts, Exception) or self_ts is None:
         print(f"    ⚠ [{ticker}] 기준 XBRL fetch 실패 — precomputed 메트릭 없이 진행", flush=True)
@@ -895,40 +1001,98 @@ async def analyze_stock(
 
     peer_ts_map: dict[str, dict] = {
         p: v for p, v in fetch_map.items()
-        if p != "__self__" and isinstance(v, dict)
+        if p not in ("__self__","__8k__","__corresp__","__form4__","__earnings__")
+        and isinstance(v, dict)
     }
+
+    # SEC 이벤트 데이터 분리 (Exception이면 None 처리)
+    def _safe_get(key: str) -> Any:
+        val = fetch_map.get(key)
+        return None if isinstance(val, Exception) else val
+
+    raw_8k      = _safe_get("__8k__")
+    raw_corresp = _safe_get("__corresp__")
+    raw_form4   = _safe_get("__form4__")
+    raw_earnings = _safe_get("__earnings__")
+
     print(
-        f"    ✓ XBRL 수집 완료: self={'OK' if self_ts else 'FAIL'}, "
-        f"peers={len(peer_ts_map)}/{len(peers)}",
+        f"    ✓ 데이터 수집 완료: XBRL={'OK' if self_ts else 'FAIL'}, "
+        f"peers={len(peer_ts_map)}/{len(peers)}, "
+        f"8K={'OK' if raw_8k else '-'}, "
+        f"CORRESP={'OK' if raw_corresp else '-'}, "
+        f"Form4={'OK' if raw_form4 else '-'}",
         flush=True,
     )
 
     # -----------------------------------------------------------------
-    # Phase 0.5: Agent 1-3 정량 메트릭 + Agent 4 Language Diff Memo 사전 계산
+    # Phase 0.5: 6개 에이전트 전용 사전 계산 (Python, 병렬)
     # -----------------------------------------------------------------
-    precomputed_map: dict[str, dict | None] = {}
-    diff_memo: dict[str, Any] | None = None
+    print(f"  ⚙  [{ticker}] Phase 0.5: 전체 사전 계산 …", flush=True)
 
+    # --- Agent 1-3: XBRL 정량 메트릭 ---
+    precomputed_map: dict[str, dict | None] = {}
     if self_ts:
-        print(f"  ⚙  [{ticker}] Phase 0.5: 정량 메트릭 + Language Diff Memo 사전 계산 …", flush=True)
         for key in ("accruals", "revenue", "capex"):
             try:
                 precomputed_map[key] = compute_precomputed_context(key, self_ts, peer_ts_map)
                 flags_count = _count_flags(precomputed_map[key])
-                print(f"    ✓ {key}: {flags_count}개 flag 발견", flush=True)
+                print(f"    ✓ {key}: {flags_count}개 flag", flush=True)
             except Exception as e:
-                print(f"    ⚠ {key} 사전 계산 실패: {e}", flush=True)
+                print(f"    ⚠ {key} 계산 실패: {e}", flush=True)
                 precomputed_map[key] = None
     else:
         precomputed_map = {"accruals": None, "revenue": None, "capex": None}
 
-    # Agent 4: Language Diff Memo (병렬로 실행 — XBRL fetch와 별개)
-    # peer_context: Agent 1-3 precomputed에서 peer 정보 추출
-    peer_context_for_diff = {
-        "peers": peers,
-        "sector": sector,
-    }
-    diff_memo = await compute_diff_memo(ticker, peer_context=peer_context_for_diff)
+    # --- Agent 4: Language Diff Memo (async, SEC fetch 포함) ---
+    peer_context_for_diff = {"peers": peers, "sector": sector}
+    diff_memo_task = compute_diff_memo(ticker, peer_context=peer_context_for_diff)
+
+    # --- Agent 5: Earnings Call 사전 계산 ---
+    def _compute_call_metrics() -> dict[str, Any]:
+        try:
+            result = agent5_precomputed(
+                ticker=ticker,
+                transcripts=transcripts or None,
+                earnings_releases_raw=raw_earnings,
+            )
+            qtrs = result.get("quarters_analyzed", 0)
+            flags_str = ", ".join(
+                k for k, v in result.get("flags", {}).items()
+                if v and v is not False and isinstance(v, bool)
+            ) or "없음"
+            print(f"    ✓ call_nlp: {qtrs}분기  flags=[{flags_str}]", flush=True)
+            return result
+        except Exception as e:
+            print(f"    ⚠ call_nlp 계산 실패: {e}", flush=True)
+            return {}
+
+    # --- Agent 6: Catalyst Monitor 사전 계산 ---
+    def _compute_catalyst_metrics() -> dict[str, Any]:
+        try:
+            result = agent6_precomputed(
+                ticker=ticker,
+                raw_8k=raw_8k,
+                raw_corresp=raw_corresp,
+                raw_form4=raw_form4,
+                lookback_days=365,
+            )
+            prob  = result.get("catalyst_probability", "NONE")
+            max_s = result.get("max_severity", 0)
+            print(f"    ✓ catalyst: prob={prob}  max_severity={max_s}", flush=True)
+            return result
+        except Exception as e:
+            print(f"    ⚠ catalyst 계산 실패: {e}", flush=True)
+            return {}
+
+    # Agent 4(async) + Agent 5/6(sync) 동시 실행
+    diff_memo, call_result, catalyst_result = await asyncio.gather(
+        diff_memo_task,
+        asyncio.to_thread(_compute_call_metrics),
+        asyncio.to_thread(_compute_catalyst_metrics),
+    )
+
+    call_precomputed     = call_result     if call_result     else None
+    catalyst_precomputed = catalyst_result if catalyst_result else None
 
     # -----------------------------------------------------------------
     # Phase 1: 6개 에이전트 병렬 실행
@@ -941,9 +1105,17 @@ async def analyze_stock(
 
     tasks = []
     for k in agent_keys:
-        precomputed = precomputed_map.get(k)     # Agent 1-3: dict, Agent 4-6: None
-        memo = diff_memo if k == "tenk_diff" else None  # Agent 4만 memo 전달
-        tasks.append(run_single_agent(k, ticker, precomputed=precomputed, diff_memo=memo))
+        precomputed  = precomputed_map.get(k)
+        memo         = diff_memo          if k == "tenk_diff" else None
+        call_ctx     = call_precomputed   if k == "call_nlp"  else None
+        catalyst_ctx = catalyst_precomputed if k == "catalyst" else None
+        tasks.append(run_single_agent(
+            k, ticker,
+            precomputed=precomputed,
+            diff_memo=memo,
+            call_precomputed=call_ctx,
+            catalyst_precomputed=catalyst_ctx,
+        ))
 
     phase1_reports = await asyncio.gather(*tasks)
     reports: dict[str, AgentReport] = {r.agent: r for r in phase1_reports}
@@ -991,18 +1163,31 @@ async def analyze_stocks(
     skip_orchestrator: bool = False,
     save_excel: bool = False,
     excel_path: str | None = None,
+    transcripts_map: dict[str, list[str]] | None = None,
 ) -> list["ForensicResult"]:
     """여러 종목 동시 분석 (종목 간 병렬).
 
     각 종목은 독립적으로 Phase 0~2 전체를 실행.
-    종목 간 peer 중복 fetch는 허용 (캐시 없음; 개선 여지 있음).
+
+    Args:
+        tickers:          분석 대상 티커 리스트
+        skip_orchestrator: True면 Opus 총괄 단계 스킵
+        save_excel:       True면 결과를 Excel 파일에 저장
+        excel_path:       Excel 파일 경로 (없으면 기본 경로)
+        transcripts_map:  {ticker: [transcript1, transcript2, ...]} 형식
+                          없으면 SEC 8-K 자동 사용
     """
     print(
         f"🚀 {len(tickers)}개 종목 동시 포렌식 분석 시작: {', '.join(tickers)}",
         flush=True,
     )
+    transcripts_map = transcripts_map or {}
     tasks = [
-        analyze_stock(t, skip_orchestrator=skip_orchestrator)
+        analyze_stock(
+            t,
+            skip_orchestrator=skip_orchestrator,
+            transcripts=transcripts_map.get(t),
+        )
         for t in tickers
     ]
     results = list(await asyncio.gather(*tasks))
