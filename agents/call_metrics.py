@@ -260,7 +260,7 @@ def _pct_change(old: float, new: float) -> float | None:
 
 
 # ===========================================================================
-# 5) 핵심 공개 API
+# 3) 핵심 공개 API
 # ===========================================================================
 
 def analyze_earnings_calls(
@@ -315,13 +315,13 @@ def analyze_earnings_calls(
         guidance = _detect_guidance(text)
 
         by_quarter.append({
-            "quarter":      label,
-            "kpis":         kpi_counts,
+            "quarter":       label,
+            "kpis":          kpi_counts,
             "hedge_density": hd,
-            "confidence":   conf,
+            "confidence":    conf,
             "non_gaap_count": ng_count,
-            "evasions":     evasions,
-            "guidance":     guidance,
+            "evasions":      evasions,
+            "guidance":      guidance,
         })
 
     # 시계열 트렌드: 분기 레이블에서 연도+분기 추출하여 오래된 순 정렬
@@ -344,17 +344,17 @@ def analyze_earnings_calls(
     else:
         ordered = sorted_quarters    # 오래된 순 (ascending)
 
-    hedge_densities  = [q["hedge_density"] for q in ordered]
-    conf_counts      = [q["confidence"] for q in ordered]
-    ng_counts        = [q["non_gaap_count"] for q in ordered]
-    gaap_counts      = [q["kpis"]["gaap_core"] for q in ordered]
-    non_gaap_counts  = [q["kpis"]["non_gaap"] for q in ordered]
-    new_kpi_counts   = [q["kpis"]["new_kpis_to_watch"] for q in ordered]
+    hedge_densities = [q["hedge_density"] for q in ordered]
+    conf_counts     = [q["confidence"] for q in ordered]
+    ng_counts       = [q["non_gaap_count"] for q in ordered]
+    gaap_counts     = [q["kpis"]["gaap_core"] for q in ordered]
+    non_gaap_counts = [q["kpis"]["non_gaap"] for q in ordered]
+    new_kpi_counts  = [q["kpis"]["new_kpis_to_watch"] for q in ordered]
 
-    hedge_trend  = _trend_label(hedge_densities)
-    conf_trend   = _trend_label([float(c) for c in conf_counts])
-    ng_trend     = _trend_label([float(n) for n in ng_counts])
-    gaap_trend   = _trend_label([float(g) for g in gaap_counts])
+    hedge_trend = _trend_label(hedge_densities)
+    conf_trend  = _trend_label([float(c) for c in conf_counts])
+    ng_trend    = _trend_label([float(n) for n in ng_counts])
+    gaap_trend  = _trend_label([float(g) for g in gaap_counts])
 
     oldest = ordered[0] if ordered else {}
     latest = ordered[-1] if ordered else {}
@@ -364,8 +364,8 @@ def analyze_earnings_calls(
         latest.get("hedge_density", 0),
     )
     conf_delta_pct = _pct_change(
-        oldest.get("confidence", 0),
-        latest.get("confidence", 0),
+        float(oldest.get("confidence", 0)),
+        float(latest.get("confidence", 0)),
     )
 
     # Q&A 회피 집계
@@ -378,9 +378,7 @@ def analyze_earnings_calls(
     kpi_substitution_detected = bool(
         len(ordered) >= 2
         and gaap_trend == "DECREASING"
-        and (ng_trend == "INCREASING"
-             or (len(ordered) < 2 or non_gaap_counts[-1] > non_gaap_counts[0])
-        ) if len(ordered) >= 1 else False
+        and ng_trend == "INCREASING"
     )
 
     flags = {
@@ -426,9 +424,9 @@ def analyze_earnings_calls(
         "quarters_analyzed":       len(ordered),
         "by_quarter":              ordered,
         "kpi_trends": {
-            "gaap_core":       gaap_trend,
-            "non_gaap":        ng_trend,
-            "new_kpis":        _trend_label([float(n) for n in new_kpi_counts]),
+            "gaap_core":  gaap_trend,
+            "non_gaap":   ng_trend,
+            "new_kpis":   _trend_label([float(n) for n in new_kpi_counts]),
         },
         "hedging_trend": {
             "trend":           hedge_trend,
@@ -436,13 +434,13 @@ def analyze_earnings_calls(
             "densities":       hedge_densities,
         },
         "confidence_trend": {
-            "trend":           conf_trend,
-            "conf_delta_pct":  conf_delta_pct,
-            "counts":          conf_counts,
+            "trend":          conf_trend,
+            "conf_delta_pct": conf_delta_pct,
+            "counts":         conf_counts,
         },
         "non_gaap_trend": {
-            "trend":           ng_trend,
-            "counts":          ng_counts,
+            "trend":  ng_trend,
+            "counts": ng_counts,
         },
         "qa_evasions":             all_evasions,
         "qa_evasion_by_type":      dict(evasion_by_type),
@@ -501,17 +499,17 @@ def agent5_precomputed(
 
 def _empty_call_result(ticker: str, reason: str) -> dict[str, Any]:
     return {
-        "ticker": ticker,
-        "quarters_analyzed": 0,
-        "by_quarter": [],
-        "kpi_trends": {},
-        "hedging_trend": {},
-        "confidence_trend": {},
-        "non_gaap_trend": {},
-        "qa_evasions": [],
-        "qa_evasion_by_type": {},
+        "ticker":                  ticker,
+        "quarters_analyzed":       0,
+        "by_quarter":              [],
+        "kpi_trends":              {},
+        "hedging_trend":           {},
+        "confidence_trend":        {},
+        "non_gaap_trend":          {},
+        "qa_evasions":             [],
+        "qa_evasion_by_type":      {},
         "guidance_quality_latest": "ABSENT",
-        "flags": {},
-        "summary_text": f"데이터 없음: {reason}",
-        "data_source": "none",
+        "flags":                   {},
+        "summary_text":            f"데이터 없음: {reason}",
+        "data_source":             "none",
     }
