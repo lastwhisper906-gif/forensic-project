@@ -19,7 +19,9 @@
       "PowerShell(& \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\pip.exe\" install FinanceDataReader 2>&1 | Select-Object -Last 8)",
       "PowerShell(& \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\python.exe\" -m pip install --upgrade pip -q 2>&1 | Select-Object -Last 3)",
       "PowerShell(& \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\pip.exe\" install FinanceDataReader --index-url https://pypi.org/simple/ -v 2>&1 | Select-Object -Last 20)",
-      "PowerShell(& \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\pip.exe\" install \"git+https://github.com/FinanceData/FinanceDataReader.git\" 2>&1 | Select-Object -Last 8)"
+      "PowerShell(& \"C:\\\\Users\\\\Lee\\\\Documents\\\\korean-stock-analyzer\\\\venv\\\\Scripts\\\\pip.exe\" install \"git+https://github.com/FinanceData/FinanceDataReader.git\" 2>&1 | Select-Object -Last 8)",
+      "mcp__920d7f8d-b273-4e57-9e3e-74a0b2e27382__web_fetch_exa",
+      "mcp__920d7f8d-b273-4e57-9e3e-74a0b2e27382__web_search_exa"
     ]
   }
 }
